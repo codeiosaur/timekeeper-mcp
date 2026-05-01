@@ -2,11 +2,13 @@
 
 Behavioral guidelines for Claude Code (and any other AI coding agent) working on `timekeeper-mcp`. Read this first. Then read `ARCHITECTURE.md` for the structural picture and `PLAN.md` for what's being built and what's next.
 
+> **Attribution:** This document is adapted from [Karpathy-inspired skills guidelines](https://github.com/forrestchang/andrej-karpathy-skills) by Forrest Chang, licensed under MIT. Used with permission.
+
 ## How to start a session
 
 1. **Read this file completely.**
 2. **Read `ARCHITECTURE.md`** — it explains the module boundaries and which file owns which concern. Most "where do I put this?" questions are answered there.
-3. **Read `PLAN.md`** — it lists the current milestone, what's done, and what's next. If your task isn't on the plan, ask before starting.
+3. **Understand the current task.** This may come from the session prompt, the user, a ticket, or commit history. If uncertain what you're building or why, ask before starting.
 4. **Run `pytest`** before making any changes, to confirm the baseline is green.
 5. Only then start implementing.
 
