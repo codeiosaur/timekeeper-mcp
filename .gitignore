@@ -13,5 +13,8 @@ dist/
 build/
 .ruff_cache/
 .mypy_cache/
-# copilot-specific
+# copilot/AI-specific
 PLAN.md
+HANDOVER.md
+STATE_SNAPSHOT.md
+DECISIONS.md
