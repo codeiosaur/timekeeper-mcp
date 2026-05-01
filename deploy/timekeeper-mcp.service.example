@@ -1,0 +1,48 @@
+# timekeeper-mcp.service.example — systemd unit for the timekeeper-mcp server
+#
+# Install:
+#   sudo cp this file /etc/systemd/system/timekeeper-mcp.service
+#   Edit User=, WorkingDirectory=, and ExecStart= paths to match your setup.
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now timekeeper-mcp
+#
+# View logs:
+#   sudo journalctl -u timekeeper-mcp -f
+
+[Unit]
+Description=timekeeper-mcp MCP server (streamable-HTTP mode)
+After=network.target
+
+[Service]
+Type=simple
+
+# Run as a non-root user. Create one if needed:
+#   sudo useradd -r -s /sbin/nologin timekeeper
+User=timekeeper
+
+# Path to the repo / installed package root
+WorkingDirectory=/opt/timekeeper-mcp
+
+# Activate the virtualenv if you installed into one; otherwise use the system python3
+ExecStart=/opt/timekeeper-mcp/.venv/bin/python -m timekeeper
+
+# Transport and bind address. 0.0.0.0 is intentional here because nginx listens
+# externally and proxies to 127.0.0.1:8765; the Python process never touches
+# the public interface directly.
+Environment=MCP_TRANSPORT=http
+Environment=MCP_HOST=127.0.0.1
+Environment=MCP_PORT=8765
+
+# Restart policy: bring the process back up on any non-zero exit
+Restart=on-failure
+RestartSec=5s
+
+# Give the process 10 seconds to flush in-flight requests before SIGKILL
+TimeoutStopSec=10
+
+# Logging goes to journald automatically via stdout/stderr
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

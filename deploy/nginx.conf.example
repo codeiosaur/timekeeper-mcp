@@ -1,0 +1,81 @@
+# nginx.conf.example — reverse proxy for timekeeper-mcp
+#
+# Install: sudo cp this file /etc/nginx/sites-available/timekeeper
+#          sudo ln -s /etc/nginx/sites-available/timekeeper /etc/nginx/sites-enabled/
+#          sudo nginx -t && sudo systemctl reload nginx
+#
+# Assumptions:
+#   - certbot has already obtained a cert for your domain (see DEPLOY.md)
+#   - timekeeper-mcp is running on 127.0.0.1:8765 (systemd service)
+#   - replace YOUR_DOMAIN below with your actual domain (e.g. timekeeper.example.duckdns.org)
+
+server {
+    listen 80;
+    server_name YOUR_DOMAIN;
+
+    # Redirect all HTTP to HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name YOUR_DOMAIN;
+
+    # Certificates managed by certbot; certbot will update these paths
+    ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+    include             /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+
+    # Streamable-HTTP MCP: disable buffering so chunks reach the client immediately
+    proxy_buffering          off;
+    proxy_cache              off;
+    # MCP tool calls can take time; don't cut them off prematurely
+    proxy_read_timeout       120s;
+    proxy_send_timeout       120s;
+    proxy_connect_timeout    10s;
+
+    # Pass real IP to the app (useful for logs and future rate limiting)
+    proxy_set_header X-Real-IP        $remote_addr;
+    proxy_set_header X-Forwarded-For  $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header Host             $host;
+
+    location /mcp {
+        proxy_pass http://127.0.0.1:8765/mcp;
+
+        # Required for HTTP/1.1 keep-alive through the proxy
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+    }
+
+    # Block everything else — this server does exactly one thing
+    location / {
+        return 404;
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCAFFOLDING: Tiered API-key rate limiting (v2, do NOT enable in v1)
+#
+# Uncomment and adapt this block when you're ready to add API-key tiering.
+# You will also need to distribute API keys out-of-band and update the map.
+#
+# http {
+#     # Map API key header → rate limit zone name
+#     map $http_x_api_key $limit_zone {
+#         default          "unauthenticated";
+#         "key-tier-free"  "tier_free";
+#         "key-tier-pro"   "tier_pro";
+#     }
+#
+#     # Define zones: zone name, shared-memory size, requests/second
+#     limit_req_zone $binary_remote_addr zone=unauthenticated:10m rate=5r/m;
+#     limit_req_zone $binary_remote_addr zone=tier_free:10m       rate=30r/m;
+#     limit_req_zone $binary_remote_addr zone=tier_pro:10m        rate=300r/m;
+# }
+#
+# Inside the location /mcp block, add:
+#     limit_req zone=$limit_zone burst=10 nodelay;
+#     limit_req_status 429;
+# ─────────────────────────────────────────────────────────────────────────────
