@@ -4,11 +4,9 @@
 
 LLMs don't know what time it is. They guess from conversation context — and they drift. This server gives them a real clock, real timezone math, and real "time until X" arithmetic, all behind three small tools designed for AI consumption.
 
-Part of the [codeiosaur](https://github.com/codeiosaur) collection of practical, ethically-licensed developer tools.
-
 ## Why this exists
 
-Anyone who has asked Claude to plan a schedule and watched it silently regress to "it's morning" when it was actually 9pm has felt this problem. The model has no clock, so it interpolates from cues in the conversation, and small errors compound. This server solves that with three tools:
+Anyone who has asked an LLM (Claude, ChatGPT, or otherwise) to plan a schedule and watched it silently regress to "it's morning" when it was actually 9pm has felt this problem. The model has no clock, so it interpolates from cues in the conversation, and small errors compound. This server solves that with three tools:
 
 - **`get_current_time`** — Returns the current time in any IANA timezone, in both machine-readable (ISO 8601, Unix timestamp, weekday/month numbers) and human-readable (12h/24h formatted) forms.
 - **`convert_time`** — Converts an ISO 8601 timestamp from one timezone to another. Useful for translating deadlines ("rate limit resets at 02:00 UTC, when's that for me?") or surfacing the same event in multiple zones.
@@ -164,7 +162,7 @@ Successful response:
 
 - That the host's clock is correct. If your server's clock is wrong, this tool will return the wrong time. Use NTP.
 - That the timezone database is current. If your system's `tzdata` is outdated, recently-changed timezones (rare but real) may be off. Keep your OS up to date.
-- Internationalization of the human-readable strings. They're US English. Use the language-neutral `weekday_number` / `month_number` fields and format yourself if you need other locales.
+- Internationalization of the human-readable strings. They are US English. Use the language-neutral `weekday_number` / `month_number` fields and format manually if you need other locales.
 
 ## Development
 
