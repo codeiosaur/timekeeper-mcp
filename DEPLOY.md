@@ -200,12 +200,24 @@ curl -s https://timekeeper-yourname.duckdns.org/mcp
 
 Then connect Claude Desktop:
 
-1. Open Claude Desktop → **Settings → Developer → MCP Servers → Add Server**.
-2. Enter name: `timekeeper`, URL: `https://timekeeper-yourname.duckdns.org/mcp`.
-3. Save and reload Claude Desktop.
+Claude Desktop does not support a bare `url` field in `claude_desktop_config.json` — it only accepts stdio servers via `command`/`args`. Use [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) as a local stdio proxy:
+
+1. Open `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows).
+2. Add an entry under `mcpServers`:
+
+```json
+"timekeeper": {
+  "command": "npx",
+  "args": ["-y", "mcp-remote", "https://timekeeper-yourname.duckdns.org/mcp"]
+}
+```
+
+3. Save and relaunch Claude Desktop.
 4. Open a new conversation and ask: *"What time is it in Tokyo?"*
 
 Expected: Claude calls `get_current_time` and returns the correct time without guessing.
+
+**Note:** Some Claude Desktop Enterprise deployments restrict the custom connector UI. The `mcp-remote` approach via the JSON config file works regardless of those restrictions, as long as `npx` is available.
 
 **Verify failure mode:** Stop the service (`sudo systemctl stop timekeeper-mcp`), ask the same question. Claude should report a tool error, not hallucinate a time.
 
