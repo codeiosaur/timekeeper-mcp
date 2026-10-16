@@ -95,9 +95,9 @@ If something can't be computed correctly, raise. The Swiss-cheese model says: be
 
 Current deps: `mcp[cli]`. That's it. `zoneinfo` and `datetime` are stdlib. If you want to add a dependency, justify it in the PR description and consider whether it could be implemented in stdlib first.
 
-### Pin Python `>=3.10`
+### Pin Python `>=3.11`
 
-`zoneinfo` is 3.9+, FastMCP is 3.10+. Don't bump the floor without discussion.
+Python 3.11 is the first version whose `datetime.fromisoformat` accepts `Z` and most ISO 8601 forms; on 3.10 the documented `...Z` examples fail. 3.10 is also end-of-life (October 2026). Don't change the floor without discussion, and don't add parsing workarounds for older versions.
 
 ## When in doubt
 

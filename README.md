@@ -14,6 +14,8 @@ Anyone who has asked an LLM (Claude, ChatGPT, or otherwise) to plan a schedule a
 
 ## Quick start (local stdio)
 
+Requires Python 3.11 or newer.
+
 ```bash
 git clone https://github.com/codeiosaur/timekeeper-mcp.git
 cd timekeeper-mcp
@@ -101,8 +103,8 @@ Successful response:
   "weekday_number": 3,
   "month_number": 4,
   "unix_timestamp": 1777585585,
-  "human_readable_24h": "Thursday, April 30, 2026 at 14:46 PDT",
-  "human_readable_12h": "Thursday, April 30, 2026 at 02:46 PM PDT"
+  "human_readable_24h": "Thursday, April 30, 2026 at 14:46 UTC-07:00",
+  "human_readable_12h": "Thursday, April 30, 2026 at 02:46 PM UTC-07:00"
 }
 ```
 
@@ -126,10 +128,12 @@ Successful response:
   "timezone": "America/Los_Angeles",
   "weekday_number": 3,
   "month_number": 5,
-  "human_readable_24h": "Thursday, May 07, 2026 at 20:59 PDT",
-  "human_readable_12h": "Thursday, May 07, 2026 at 08:59 PM PDT"
+  "human_readable_24h": "Thursday, May 07, 2026 at 20:59 UTC-07:00",
+  "human_readable_12h": "Thursday, May 07, 2026 at 08:59 PM UTC-07:00"
 }
 ```
+
+The `human_readable_*` strings currently end with the numeric UTC offset (e.g. `UTC-07:00`), not a zone abbreviation such as `PDT`. Use `timezone` and the ISO fields if you need the zone.
 
 ### `time_until(iso_timestamp: str) -> dict`
 
@@ -150,6 +154,8 @@ Successful response:
 
 `total_seconds` is signed: negative if the target is in the past. Check `is_past` for an explicit boolean.
 
+`is_past` compares the exact (microsecond) difference: a target even half a second ago is past, a target equal to now is not. `total_seconds` and the breakdown are whole seconds truncated toward zero, so a target less than one second ago reports `total_seconds: 0` with `is_past: true`.
+
 ## What this guarantees, and what it doesn't
 
 **Guarantees:**
@@ -162,6 +168,7 @@ Successful response:
 
 - That the host's clock is correct. If your server's clock is wrong, this tool will return the wrong time. Use NTP.
 - That the timezone database is current. If your system's `tzdata` is outdated, recently-changed timezones (rare but real) may be off. Keep your OS up to date.
+- That timezone-data updates take effect immediately. The server reads the timezone database when it first needs it and keeps it for the life of the process, so restart the server after updating `tzdata` (OS package or Python package).
 - Internationalization of the human-readable strings. They are US English. Use the language-neutral `weekday_number` / `month_number` fields and format manually if you need other locales.
 
 ## Development
