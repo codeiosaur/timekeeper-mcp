@@ -41,7 +41,7 @@ The principle: **the inner layers don't know about the outer layers.** `core.py`
 
 **Does NOT know about:** MCP, HTTP, FastMCP, formatting strings, dictionaries-as-error-shapes.
 
-**API:** Three pure functions (`get_time_in_zone`, `convert_to_zone`, `time_until`), each accepting an optional `clock_fn` for testability. Errors are raised as `TimekeeperError`.
+**API:** Three pure functions (`get_time_in_zone`, `convert_to_zone`, `time_until`); those that read the current time accept an optional `clock_fn` for testability. A fourth helper, `zoned`, returns a `ZoneInfo`-backed datetime so that formatting can show zone abbreviations; `server.py` does not use it yet, so tool output currently shows numeric offsets (e.g. `UTC-07:00`). Errors are raised as `TimekeeperError`.
 
 ### `timekeeper/formatting.py` — Formatting helpers
 

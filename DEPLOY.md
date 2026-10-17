@@ -247,6 +247,8 @@ sudo -u timekeeper /opt/timekeeper-mcp/.venv/bin/pip install -e /opt/timekeeper-
 sudo systemctl restart timekeeper-mcp
 ```
 
+Restart the service after any timezone-data update as well (for example after `apt upgrade` updates the `tzdata` package). The server loads timezone data once per process and does not pick up changes until it restarts.
+
 ---
 
 ## DuckDNS IP auto-update (optional but recommended)
