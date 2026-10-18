@@ -41,7 +41,7 @@ The principle: **the inner layers don't know about the outer layers.** `core.py`
 
 **Does NOT know about:** MCP, HTTP, FastMCP, formatting strings, dictionaries-as-error-shapes.
 
-**API:** Three pure functions (`get_time_in_zone`, `convert_to_zone`, `time_until`); those that read the current time accept an optional `clock_fn` for testability. A fourth helper, `zoned`, returns a `ZoneInfo`-backed datetime so that formatting can show zone abbreviations; `server.py` does not use it yet, so tool output currently shows numeric offsets (e.g. `UTC-07:00`). Errors are raised as `TimekeeperError`.
+**API:** Three pure functions (`get_time_in_zone`, `convert_to_zone`, `time_until`); those that read the current time accept an optional `clock_fn` for testability. A fourth helper, `zoned`, returns a `ZoneInfo`-backed datetime that `server.py` passes to formatting so output shows zone abbreviations (e.g. `PDT`). Errors are raised as `TimekeeperError`.
 
 ### `timekeeper/formatting.py` — Formatting helpers
 
@@ -55,7 +55,7 @@ The principle: **the inner layers don't know about the outer layers.** `core.py`
 
 ### `timekeeper/server.py` — MCP adapter
 
-**Owns:** Tool registration with FastMCP. Translation between MCP's protocol and the domain. Error-shape translation (exceptions → dicts).
+**Owns:** Tool registration with FastMCP. Translation between MCP's protocol and the domain. Error-shape translation: every tool returns an explicit `CallToolResult` whose JSON text (and `structuredContent`) is the result dict, and errors set `isError=True` with `{"error": ..., ...echoed inputs}`. Unexpected exceptions are logged to stderr and reported only as `"Internal error"`. Each tool also declares an output model (`CurrentTimeOutput`, `ConversionOutput`, `DurationOutput`), which FastMCP publishes as its `outputSchema` and checks every result against. Because SDK 1.x checks error results against it too, each model is one object that types both the success fields and the error/echoed-input fields. All fields are optional, unknown fields are rejected, and types are checked strictly. Each tool also validates its success payload against that model inside its own error handling before returning, so malformed internal output becomes the generic `"Internal error"` result (details logged server-side) rather than reaching the client. The SDK's validation remains as a backstop; on its own it would return raw validation details as plain text.
 
 **Knows about:** FastMCP, the domain, the formatting helpers.
 
@@ -80,8 +80,8 @@ When adding a new MCP tool, follow this sequence:
 1. **Add the pure function to `core.py`.** It should take inputs and return a dict. Take `clock_fn` if it needs the current time. Raise `TimekeeperError` for bad inputs.
 2. **Add tests to `tests/test_core.py`.** Test happy path and at least one failure mode. Use a fake clock.
 3. **If human-readable strings are needed, add helpers to `formatting.py`** and tests in `tests/test_formatting.py`.
-4. **Wrap the core function in an `@mcp.tool()` in `server.py`.** Write the docstring for the LLM (directive, not descriptive). Catch `TimekeeperError` and return an error dict.
-5. **Add a smoke test to `tests/test_server.py`.** Verify the wrapper passes through correctly and that errors come back as structured dicts.
+4. **Wrap the core function in an `@mcp.tool()` in `server.py`.** Write the docstring for the LLM (directive, not descriptive). Return `_result(...)` on success. Catch `TimekeeperError` and return `_error(str(exc), **inputs)`, and catch any other `Exception`, log it, and return `_error("Internal error", **inputs)`. Add `annotations=_annotations(...)`, and annotate the return type as `Annotated[CallToolResult, <Output model>]`, where the output model lists every success and error field.
+5. **Add tests to `tests/test_server.py`.** Through the in-memory MCP client, verify a success result and an error result (`isError`, JSON payload, echoed inputs).
 6. **Update the README's "Tool reference" section.**
 
 A new tool should be `< 50 lines` of production code total (across `core` and `server`) plus its tests. If it's more, ask whether you're solving the right problem.
@@ -90,7 +90,7 @@ A new tool should be `< 50 lines` of production code total (across `core` and `s
 
 Lecture 8 of CS 3100 (and most senior engineers anywhere) will tell you to favor composition over inheritance. This project takes that further: favor *functions* over composition, favor *modules* over classes, and favor *no abstraction* over premature abstraction.
 
-There are no classes in this codebase except `TimekeeperError`. The "interfaces" are function signatures with type hints. The "dependency injection" is a default argument. This isn't dogma — it's that for a project this small, anything more is overhead.
+The only classes in this codebase are `TimekeeperError` and the pydantic output models in `server.py`, which exist only because FastMCP builds a tool's `outputSchema` from a model class; they hold no behavior. The "interfaces" are function signatures with type hints. The "dependency injection" is a default argument. This isn't dogma — it's that for a project this small, anything more is overhead.
 
 If the project grows to need genuine OOP (state to manage, behavior to vary at runtime, etc.), revisit. Until then, resist.
 
@@ -98,7 +98,7 @@ If the project grows to need genuine OOP (state to manage, behavior to vary at r
 
 - **`tests/test_core.py`** — Tests pure functions with injected fake clocks. These should be the bulk of the test suite. Every behavior worth guaranteeing lives here.
 - **`tests/test_formatting.py`** — Smoke tests for string formatting. We trust strftime.
-- **`tests/test_server.py`** — Light integration tests verifying the MCP layer translates correctly between exceptions and error dicts. We don't spin up a real MCP transport in tests; that's the framework's job.
+- **`tests/test_server.py`** — Adapter tests through a real MCP client session connected in memory: tool listing, annotations, success and error results as seen on the wire (`isError`, JSON text, `structuredContent`), and non-disclosure of internal errors. Transport-level tests live in `tests/test_http_integration.py`.
 
 We do not aim for 100% coverage. We aim for: every behavior the README documents has a test. Every bug we've ever hit has a regression test. That's enough.
 

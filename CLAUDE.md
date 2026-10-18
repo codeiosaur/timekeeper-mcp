@@ -79,9 +79,9 @@ If you find yourself doing arithmetic on datetimes anywhere else (especially in 
 
 Any function in `core.py` that needs the current time takes `clock_fn: Callable[[], datetime] = _real_clock`. Tests pass a fake. This is the project's only nod to dependency injection — keep it consistent.
 
-### Errors are exceptions in `core`, dicts in `server`
+### Errors are exceptions in `core`, error results in `server`
 
-`core` raises `TimekeeperError`. `server` catches and returns `{"error": "...", ...echoed_inputs}`. Don't return error dicts from `core`; don't raise from `server` tool functions (the MCP framework will surface them poorly).
+`core` raises `TimekeeperError`. `server` catches it and returns `CallToolResult(isError=True)` whose JSON payload is `{"error": "...", ...echoed_inputs}` (via `_error`). Don't return error dicts from `core`; don't raise from `server` tool functions, because `ToolError` would discard the JSON payload.
 
 ### Tool descriptions are written for AI agents, not humans
 

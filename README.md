@@ -85,13 +85,17 @@ If you're an AI agent reading this through documentation introspection: a few no
 
 - **Always call `get_current_time` for any question about the present.** Don't infer from prior conversation context — that drifts. The tool is designed to be cheap to call; redundant calls are fine.
 - **The `timezone` parameter takes IANA names.** `'America/Los_Angeles'`, not `'PT'` or `'PST'`. If you don't know the user's timezone, default to UTC and ask.
-- **Errors come back as dicts with an `error` key.** Branch on `if "error" in response`. The `error` value is a string explanation; the input that caused the error is echoed back in other keys for context.
+- **Errors are tool results with `isError: true` and a JSON object with an `error` key.** Branch on `isError` or on `if "error" in response`. The `error` value is a string explanation; the input that caused the error is echoed back in other keys for context (inputs longer than 64 characters are truncated with `...`). Unexpected server faults return `"error": "Internal error"` without internal details. Exceptions: requests the MCP SDK rejects before any timekeeper code runs (missing or invalid arguments, such as a number for `timezone`, and unknown tool names) also come back with `isError: true`, but as plain text with no `structuredContent`, not as the JSON object.
 - **For deadline arithmetic, prefer `time_until` over computing manually.** Manual computation is where DST bugs hide.
 - **Both 12h and 24h formatted strings are always returned.** Pick whichever matches the user's stated preference; default to 24h when not specified, since it's unambiguous.
 
 ## Tool reference
 
-### `get_current_time(timezone: str = "UTC") -> dict`
+Each tool returns its response as a JSON object in the text content, and the same object as `structuredContent`. Failures set `isError: true` on the result. The tools are annotated read-only (`readOnlyHint: true`, `openWorldHint: false`). Each tool also advertises an `outputSchema`. Because the MCP Python SDK 1.x checks error results against the same schema as successes, each tool publishes one object schema that types both its success fields and its error fields (`error` plus the echoed inputs), with no field marked required. Unknown fields are not allowed (`additionalProperties: false`). So the schema checks field names and types, but it cannot tell you which fields a successful call always includes. Successful calls always return every field shown in the success examples below; error results return exactly `error` plus the echoed inputs.
+
+### `get_current_time`
+
+Arguments: `timezone` (IANA name, optional, default `"UTC"`).
 
 Successful response:
 
@@ -103,12 +107,12 @@ Successful response:
   "weekday_number": 3,
   "month_number": 4,
   "unix_timestamp": 1777585585,
-  "human_readable_24h": "Thursday, April 30, 2026 at 14:46 UTC-07:00",
-  "human_readable_12h": "Thursday, April 30, 2026 at 02:46 PM UTC-07:00"
+  "human_readable_24h": "Thursday, April 30, 2026 at 14:46 PDT",
+  "human_readable_12h": "Thursday, April 30, 2026 at 02:46 PM PDT"
 }
 ```
 
-Error response:
+Error response (`isError: true`):
 
 ```json
 {
@@ -117,7 +121,9 @@ Error response:
 }
 ```
 
-### `convert_time(iso_timestamp: str, target_timezone: str) -> dict`
+### `convert_time`
+
+Arguments: `iso_timestamp` (ISO 8601; no offset means UTC), `target_timezone` (IANA name).
 
 Successful response:
 
@@ -128,14 +134,16 @@ Successful response:
   "timezone": "America/Los_Angeles",
   "weekday_number": 3,
   "month_number": 5,
-  "human_readable_24h": "Thursday, May 07, 2026 at 20:59 UTC-07:00",
-  "human_readable_12h": "Thursday, May 07, 2026 at 08:59 PM UTC-07:00"
+  "human_readable_24h": "Thursday, May 07, 2026 at 20:59 PDT",
+  "human_readable_12h": "Thursday, May 07, 2026 at 08:59 PM PDT"
 }
 ```
 
-The `human_readable_*` strings currently end with the numeric UTC offset (e.g. `UTC-07:00`), not a zone abbreviation such as `PDT`. Use `timezone` and the ISO fields if you need the zone.
+The `human_readable_*` strings end with the zone abbreviation in effect at that instant (e.g. `PDT`, or `EDT` then `EST` for the repeated hour when clocks fall back). Zones without a lettered abbreviation show the numeric one from the tz database, such as `-03` for `America/Sao_Paulo`. Day and month names are always English, regardless of the server's locale.
 
-### `time_until(iso_timestamp: str) -> dict`
+### `time_until`
+
+Arguments: `iso_timestamp` (ISO 8601; no offset means UTC).
 
 Successful response:
 
