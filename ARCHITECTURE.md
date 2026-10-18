@@ -65,9 +65,9 @@ The principle: **the inner layers don't know about the outer layers.** `core.py`
 
 ### `timekeeper/__main__.py` — Entry point
 
-**Owns:** Picking the transport based on environment variables. Starting the server.
+**Owns:** Picking the transport based on environment variables. Starting the server. For HTTP only, `configure_http()` applies transport settings from the environment: bind address, `Host`/`Origin` allowlists (DNS-rebinding protection always on), a 64 KiB request-body limit, and stateful-session bounds (10-minute idle timeout, 200 sessions). It must run before `mcp.run(transport="streamable-http")`, which is when FastMCP reads these settings to build the HTTP app.
 
-**Knows about:** The server module, environment variables, `os.environ`.
+**Knows about:** The server module, environment variables, `os.environ`, and the MCP SDK's `TransportSecuritySettings`.
 
 **Does NOT know about:** The domain, formatting, or any specifics of what the server does.
 
