@@ -17,11 +17,15 @@ The probe connects only to the targets it is given (a loopback listener and a
 listener on this host's own interface address), to TEST-NET-1 (192.0.2.1) and,
 when the host has an IPv6 route for it, to 2001:db8::1. Those two are
 documentation-only destinations, assigned to no real host; the script decides
-on IPv6 with a read-only route lookup. The attempts are made only to show the
-sandbox refuses them with EPERM before anything is sent; if the filter were
-missing, a packet could leave through a local default route towards a
-non-existent host. It never contacts metadata or private-network services,
-and it never connects a Unix-domain socket.
+on IPv6 with a read-only route lookup. Connecting to them can only show a
+failure of the filter (a connection), never prove it works, because an
+unsandboxed attempt can fail the same way; if the filter were missing, a
+packet could leave through a local default route towards a non-existent
+host. The proof that the filter blocks traffic is the host-interface
+listener: reachable outside the sandbox (a positive control the script
+runs), and never reached from inside it, as its accept count shows. It never
+contacts metadata or private-network services, and it never connects a
+Unix-domain socket.
 """
 from __future__ import annotations
 
@@ -38,10 +42,11 @@ import time
 
 TEST_NET_1 = ("192.0.2.1", 80)
 COMMAND_TIMEOUT_SECONDS = 10
-CONNECT_TIMEOUT_SECONDS = 5
-# A connect blocked by IPAddressDeny fails at once; a slow failure suggests
-# the packet left the host instead.
-IMMEDIATE_SECONDS = 2.0
+# IPAddressDeny is enforced by cgroup BPF programs that drop packets. A
+# dropped TCP SYN is not reported to connect(), which keeps retrying, so a
+# blocked connect usually ends in a timeout rather than an immediate error.
+# A timeout alone therefore proves nothing; see host-interface-connect-failed.
+CONNECT_TIMEOUT_SECONDS = 3
 
 
 # --- probe -------------------------------------------------------------------
@@ -55,6 +60,10 @@ class Checks:
     def skip(self, name: str, reason: str) -> None:
         self.skipped += 1
         print(f"SKIP {name}: {reason}", flush=True)
+
+    def info(self, name: str, detail: str) -> None:
+        """Report an observation that is neither a pass nor a failure."""
+        print(f"INFO {name}: {detail}", flush=True)
 
     def record(self, name: str, ok: bool, detail: str) -> None:
         if ok:
@@ -104,16 +113,31 @@ def _unreadable(path: str) -> tuple[bool, str]:
     return False, "file was readable"  # never print the contents
 
 
-def _connect_refused_with_eperm(address: tuple[str, int]) -> tuple[bool, str]:
+def _try_connect(address: tuple[str, int]) -> tuple[bool, str]:
+    """Attempt a TCP connection; return (connected, description)."""
     start = time.monotonic()
     try:
         socket.create_connection(address, timeout=CONNECT_TIMEOUT_SECONDS).close()
     except OSError as exc:
         elapsed = time.monotonic() - start
         name = errno.errorcode.get(exc.errno, str(exc.errno)) if exc.errno else type(exc).__name__
-        ok = exc.errno == errno.EPERM and elapsed < IMMEDIATE_SECONDS
-        return ok, f"failed with {name} after {elapsed:.2f}s (expected EPERM within {IMMEDIATE_SECONDS}s)"
-    return False, "connection succeeded"
+        return False, f"no connection: {name} after {elapsed:.2f}s"
+    return True, f"connected after {time.monotonic() - start:.2f}s"
+
+
+def _documentation_address(checks: Checks, name: str, address: tuple[str, int]) -> None:
+    """Connect to a reserved documentation address that no host answers.
+
+    Success would mean the filter let traffic out (and something answered), so
+    it fails. Anything else is inconclusive: an unfiltered connect to such an
+    address can also time out or be refused, so it is reported, not counted.
+    """
+    connected, detail = _try_connect(address)
+    if connected:
+        checks.record(name, False, f"{detail} to {address[0]} (must not be reachable)")
+    else:
+        checks.info(name, f"{detail} to {address[0]}; inconclusive on its own (an "
+                          "unsandboxed attempt could fail the same way)")
 
 
 def _block_devices() -> list[str]:
@@ -203,18 +227,22 @@ def probe(args: argparse.Namespace) -> int:
             return right.recv(1) == b"x", "socketpair() created and carried a byte"
     checks.run("socketpair-allowed", socketpair_allowed)
 
-    checks.run("host-interface-denied",
-               lambda: _connect_refused_with_eperm((args.host_ip, args.host_port)))
-    checks.run("test-net-1-denied", lambda: _connect_refused_with_eperm(TEST_NET_1))
+    def host_interface_connect_failed():
+        # The verification script made the same connection as the same user
+        # outside the sandbox (it succeeded and the listener counted it), and
+        # after this probe it checks the listener counted nothing more. That
+        # listener-side count is the evidence; this only records the attempt.
+        connected, detail = _try_connect((args.host_ip, args.host_port))
+        return not connected, (f"{detail} to {args.host_ip}:{args.host_port}; the "
+                               "listener's accept count is checked by the script")
+    checks.run("host-interface-connect-failed", host_interface_connect_failed)
+    _documentation_address(checks, "test-net-1-not-reachable", TEST_NET_1)
     if args.ipv6_route == "yes":
-        # The host routes this prefix, so only the sandbox's filter can make
-        # the connect fail with EPERM.
-        checks.run("ipv6-documentation-prefix-denied",
-                   lambda: _connect_refused_with_eperm((args.ipv6_target, 80)))
+        _documentation_address(checks, "ipv6-documentation-prefix-not-reachable",
+                               (args.ipv6_target, 80))
     else:
-        checks.skip("ipv6-documentation-prefix-denied",
-                    "the host has no IPv6 stack or no route to the documentation prefix, "
-                    "so a refusal would not show the filter at work")
+        checks.skip("ipv6-documentation-prefix-not-reachable",
+                    "the host has no IPv6 stack or no route to the documentation prefix")
 
     print(f"PROBE RESULT: {checks.passed} passed, {checks.failed} failed, "
           f"{checks.skipped} skipped", flush=True)
@@ -223,15 +251,22 @@ def probe(args: argparse.Namespace) -> int:
 
 # --- listen ------------------------------------------------------------------
 
+def _write_atomically(path: str, text: str) -> None:
+    temp = f"{path}.tmp"
+    with open(temp, "w") as handle:
+        handle.write(text)
+    os.replace(temp, path)
+
+
 def listen(args: argparse.Namespace) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.bind((args.bind, 0))
         server.listen(16)
         server.settimeout(1)
-        temp = f"{args.port_file}.tmp"
-        with open(temp, "w") as handle:
-            handle.write(str(server.getsockname()[1]))
-        os.replace(temp, args.port_file)
+        accepted = 0
+        if args.count_file:
+            _write_atomically(args.count_file, "0")
+        _write_atomically(args.port_file, str(server.getsockname()[1]))
         deadline = time.monotonic() + args.lifetime
         while time.monotonic() < deadline:
             try:
@@ -239,6 +274,9 @@ def listen(args: argparse.Namespace) -> int:
             except socket.timeout:
                 continue
             connection.close()
+            accepted += 1
+            if args.count_file:
+                _write_atomically(args.count_file, str(accepted))
     return 0
 
 
@@ -330,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bind", required=True)
     p.add_argument("--port-file", required=True)
     p.add_argument("--lifetime", type=float, default=600)
+    p.add_argument("--count-file", help="kept up to date with the number of accepted connections")
 
     p = commands.add_parser("client")
     p.add_argument("--url", required=True)

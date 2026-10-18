@@ -252,13 +252,13 @@ Expected: `Active: active (running)`. If not, check logs:
 sudo journalctl -u timekeeper-mcp -n 50
 ```
 
-Check for signs that the IP filter was not installed. `IPAddressDeny=` and `IPAddressAllow=` need cgroup v2 with BPF support (Ubuntu 22.04 has it), and systemd applies them best-effort: if it cannot compile or attach the filter it logs an error (lines starting `bpf-firewall:`) and starts the service without it. A "not supported" notice may be logged only once per boot against another unit, or only at debug level (inside containers, for example), so search the whole boot:
+Check for signs that the IP filter was not installed. `IPAddressDeny=` and `IPAddressAllow=` need cgroup v2 with BPF support (Ubuntu 22.04 has it), and systemd applies them best-effort: if it cannot compile or attach the filter it logs an error (lines starting `bpf-firewall:`) and starts the service without it. A "not supported" notice ("unit configures an IP firewall, but ...") may be logged only once per boot against another unit, or only at debug level (inside containers, for example), so search the system manager's messages for the whole boot, plus this unit's own log:
 
 ```bash
-sudo journalctl -b | grep -i -E 'bpf-firewall|firewall'
+{ sudo journalctl -b _PID=1; sudo journalctl -b -u timekeeper-mcp; } | grep -i -E 'bpf-firewall|IP firewall|firewalling'
 ```
 
-Any line from systemd about `bpf-firewall` or about IP firewalling not being supported means the IP restriction is not active for that unit. Lines from other firewall software (such as ufw or firewalld) may also match; they are unrelated. No matching output is consistent with an active filter but does not prove it, and a container host may not log the problem at all. `systemctl show -p IPAddressDeny timekeeper-mcp` reports only what is configured, not whether the filter is in effect.
+Any match means the IP restriction may not be active for that unit. Restricting the search to the system manager (PID 1) and this unit leaves out unrelated firewall messages from other software, such as cloud agents, ufw, or rootless containers' own user managers. No matching output is consistent with an active filter but does not prove it, and a container host may not log the problem at all. `systemctl show -p IPAddressDeny timekeeper-mcp` reports only what is configured, not whether the filter is in effect.
 
 ### Smoke-test on loopback
 

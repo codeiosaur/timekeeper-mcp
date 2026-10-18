@@ -141,7 +141,7 @@ require_prerequisites() {
     local tool
     for tool in systemctl journalctl systemd-analyze useradd userdel runuser \
                 ip timeout install sed grep diff stat id readlink awk cut head \
-                od tr mktemp basename hostname cp ln chmod chown date find; do
+                od tr mktemp basename hostname cp ln chmod chown date find sort; do
         command -v "$tool" >/dev/null || die "missing prerequisite: $tool"
     done
     [[ -x /usr/sbin/nologin ]] || die "missing /usr/sbin/nologin"
@@ -282,11 +282,22 @@ wait_for_file() {  # path deadline_seconds
 }
 
 start_listener() {  # bind_address name; the port lands in $WORK_DIR/<name>.port
+    # and the number of accepted connections in $WORK_DIR/<name>.count
     local port_file="$WORK_DIR/$2.port"
     "$PYTHON" -I "$PROBE_SOURCE" listen --bind "$1" --port-file "$port_file" \
-        --lifetime 900 >"$WORK_DIR/$2.log" 2>&1 </dev/null &
+        --count-file "$WORK_DIR/$2.count" --lifetime 900 >"$WORK_DIR/$2.log" 2>&1 </dev/null &
     LISTENER_PIDS+=("$!")
     wait_for_file "$port_file" "$LISTENER_READY_DEADLINE"
+}
+
+accepted() { cat "$WORK_DIR/$1.count"; }  # name -> accepted connections so far
+
+wait_for_accepted() {  # name count deadline_seconds: true once the listener has accepted count
+    local deadline=$((SECONDS + $3))
+    until [[ $(accepted "$1") -ge $2 ]]; do
+        ((SECONDS < deadline)) || return 1
+        sleep 0.1
+    done
 }
 
 as_service_user() { bounded "$COMMAND_DEADLINE" runuser -u "$SERVICE_USER" -- "$@"; }
@@ -308,19 +319,28 @@ unit_journal_since() {  # unit epoch_seconds
         2>/dev/null || true
 }
 
-# When systemd cannot compile or attach the IPAddressDeny/Allow filter it
-# runs the unit without it ("best effort") and logs "bpf-firewall: ..." errors;
-# its "not supported" notice may be logged once per boot against another unit,
-# or only at debug level (for example in containers). So the whole boot's
-# journal is searched, case-insensitively, for anything firewall-related. A
-# match fails the run (unrelated firewall software can cause a false failure);
-# no match is consistent with an active filter but does not prove it. In this
-# test, the probe unit's EPERM checks are the behavioral evidence; the absence
-# of firewall messages is only supporting evidence, never proof.
-boot_firewall_messages() {
+# When the system manager cannot compile or attach the IPAddressDeny/Allow
+# filter it runs the unit without it ("best effort") and logs it in its own
+# words: "bpf-firewall: ..." errors, or "<unit>: unit configures an IP
+# firewall, but ..." followed by "(This warning is only shown for the first
+# unit using IP firewalling.)". That notice is shown once per manager per
+# boot, against whichever unit used IP filtering first, so the system
+# manager's (PID 1's) messages are searched for the whole boot, plus
+# everything our two units logged since the probe started (argument: epoch).
+# Other processes' firewall messages (cloud agents, ufw, user managers for
+# rootless containers, which run their own units) say nothing about our
+# units and are not consulted. A match fails the run; no match is consistent
+# with an active filter but does not prove it, and some systems log the
+# notice only at debug level. The behavioral evidence is the host-interface
+# listener check; these messages are supporting evidence, never proof.
+readonly BPF_FIREWALL_PATTERN='bpf-firewall|IP firewall|firewalling'
+bpf_firewall_messages() {  # since_epoch
     bounded "$COMMAND_DEADLINE" journalctl --sync 2>/dev/null || true
-    bounded "$COMMAND_DEADLINE" journalctl -b --no-pager -o cat 2>/dev/null \
-        | grep -i -E 'bpf-firewall|firewall' || true
+    {
+        bounded "$COMMAND_DEADLINE" journalctl -b _PID=1 --no-pager -o cat 2>/dev/null || true
+        bounded "$COMMAND_DEADLINE" journalctl -u "$PROBE_SERVICE" -u "$SERVICE" --since "@$1" \
+            --no-pager -o cat 2>/dev/null || true
+    } | grep -i -E "$BPF_FIREWALL_PATTERN" | sort -u || true
 }
 
 FAILURES=0
@@ -417,6 +437,10 @@ done
 as_service_user "$PYTHON" -I -c \
     "import socket; socket.create_connection(('$HOST_IP', $HOST_PORT), timeout=5).close()" \
     || die "control: $HOST_IP:$HOST_PORT not reachable outside the sandbox"
+wait_for_accepted host 1 "$LISTENER_READY_DEADLINE" \
+    || die "control: the $HOST_IP listener did not count the unsandboxed connection"
+[[ $(accepted host) -eq 1 && $(accepted loopback) -eq 0 ]] \
+    || die "control: unexpected listener counts (host $(accepted host), loopback $(accepted loopback))"
 as_service_user "$PYTHON" -I -c "import socket; socket.socket(socket.AF_UNIX).close()" \
     || die "control: $SERVICE_USER cannot create a Unix-domain socket outside the sandbox"
 [[ -e $HOST_MARKER ]] || die "control: host marker missing"
@@ -483,6 +507,16 @@ check "probe unit exit" "systemctl start exited $PROBE_START" 0 \
 check "probe result" "$(grep -E '^PROBE RESULT: ' <<<"$PROBE_OUTPUT" || echo 'no result line')" \
     "N passed, 0 failed" \
     "$(grep -q -E '^PROBE RESULT: [0-9]+ passed, 0 failed' <<<"$PROBE_OUTPUT" && echo ok)"
+# Listener-side evidence. Inside the sandbox the probe connected to the
+# loopback listener (allowed) and tried the host-interface listener, which
+# the same user reached from outside the sandbox above. Only the loopback
+# listener may have counted a connection from the probe.
+wait_for_accepted loopback 1 "$LISTENER_READY_DEADLINE" || true
+check "loopback listener reached from the sandbox" "accepted $(accepted loopback)" 1 \
+    "$([[ $(accepted loopback) -eq 1 ]] && echo ok)"
+check "host-interface listener not reached from the sandbox" \
+    "accepted $(accepted host) (1 = the unsandboxed control)" 1 \
+    "$([[ $(accepted host) -eq 1 ]] && echo ok)"
 
 log "starting the real service ($SERVICE)"
 SERVICE_EPOCH=$(date +%s)
@@ -507,8 +541,8 @@ check MemoryMax "$value" 268435456 "$([[ $value == 268435456 ]] && echo ok)"
 value=$(unit_property "$SERVICE" TasksMax)
 check TasksMax "$value" 64 "$([[ $value == 64 ]] && echo ok)"
 # The configured value only. Behavioral evidence that the filter is active
-# comes from the probe unit's EPERM checks; the absence of firewall messages
-# below is only supporting evidence, never proof.
+# comes from the host-interface listener check above; the absence of
+# BPF-firewall messages below is only supporting evidence, never proof.
 value=$(unit_property "$SERVICE" IPAddressDeny)
 check "IPAddressDeny (configured)" "$value" "0.0.0.0/0 and ::/0" \
     "$([[ $value == *0.0.0.0/0* && $value == *::/0* ]] && echo ok)"
@@ -520,9 +554,9 @@ check "journal has request log lines" "$(grep -c 'POST /mcp' <<<"$SERVICE_LOG" |
 check "journal free of the tool-argument marker" \
     "$(grep -c -F "$LOG_MARKER" <<<"$SERVICE_LOG" || true) matches" 0 \
     "$(grep -q -F "$LOG_MARKER" <<<"$SERVICE_LOG" || echo ok)"
-WARNINGS=$(boot_firewall_messages)
+WARNINGS=$(bpf_firewall_messages "$PROBE_EPOCH")
 [[ -z $WARNINGS ]] || printf '%s\n' "$WARNINGS"
-check "no firewall-related message in this boot's journal (not proof of an active filter)" \
+check "no BPF-firewall message from the system manager or our units (not proof of an active filter)" \
     "$(grep -c . <<<"$WARNINGS" || true) lines" 0 "$([[ -z $WARNINGS ]] && echo ok)"
 
 log "informational only: systemd-analyze security $SERVICE"
