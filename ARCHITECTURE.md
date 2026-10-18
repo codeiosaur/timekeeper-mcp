@@ -81,7 +81,7 @@ When adding a new MCP tool, follow this sequence:
 2. **Add tests to `tests/test_core.py`.** Test happy path and at least one failure mode. Use a fake clock.
 3. **If human-readable strings are needed, add helpers to `formatting.py`** and tests in `tests/test_formatting.py`.
 4. **Wrap the core function in an `@mcp.tool()` in `server.py`.** Write the docstring for the LLM (directive, not descriptive). Return `_result(...)` on success. Catch `TimekeeperError` and return `_error(str(exc), **inputs)`, and catch any other `Exception`, log it, and return `_error("Internal error", **inputs)`. Add `annotations=_annotations(...)`, and annotate the return type as `Annotated[CallToolResult, <Output model>]`, where the output model lists every success and error field.
-5. **Add tests to `tests/test_server.py`.** Through the in-memory MCP client, verify a success result and an error result (`isError`, JSON payload, echoed inputs).
+5. **Add tests to `tests/test_server.py`.** Through the in-memory MCP client, verify a success result and an error result (`isError`, JSON payload, echoed inputs). Add a success and an error call to `TOOL_CALLS` in `tests/harness.py` so the stdio and HTTP end-to-end flows exercise it.
 6. **Update the README's "Tool reference" section.**
 
 A new tool should be `< 50 lines` of production code total (across `core` and `server`) plus its tests. If it's more, ask whether you're solving the right problem.
@@ -98,7 +98,10 @@ If the project grows to need genuine OOP (state to manage, behavior to vary at r
 
 - **`tests/test_core.py`** — Tests pure functions with injected fake clocks. These should be the bulk of the test suite. Every behavior worth guaranteeing lives here.
 - **`tests/test_formatting.py`** — Smoke tests for string formatting. We trust strftime.
-- **`tests/test_server.py`** — Adapter tests through a real MCP client session connected in memory: tool listing, annotations, success and error results as seen on the wire (`isError`, JSON text, `structuredContent`), and non-disclosure of internal errors. Transport-level tests live in `tests/test_http_integration.py`.
+- **`tests/test_server.py`** — Adapter tests through a real MCP client session connected in memory: tool listing, annotations, success and error results as seen on the wire (`isError`, JSON text, `structuredContent`), and non-disclosure of internal errors.
+- **`tests/test_http_integration.py`** and **`tests/test_stdio.py`** — End-to-end tests against the real entrypoint as a subprocess: a complete initialized session through the official MCP SDK client calls every tool on success and error paths. The stdio tests also check that stdout carries only JSON-RPC messages and that diagnostics go to stderr.
+- **`tests/test_http_transport.py`** — HTTP transport configuration: `Host`/`Origin` validation, request-body limit, and session bounds.
+- **`tests/harness.py`** and **`tests/conftest.py`** — Shared subprocess harness: ephemeral ports, readiness by `initialize` POST with a 10 second deadline, child output to log files, and terminate-then-kill teardown. No test depends on a fixed port.
 
 We do not aim for 100% coverage. We aim for: every behavior the README documents has a test. Every bug we've ever hit has a regression test. That's enough.
 
