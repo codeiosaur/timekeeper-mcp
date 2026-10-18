@@ -93,7 +93,7 @@ If something can't be computed correctly, raise. The Swiss-cheese model says: be
 
 ### Don't add dependencies casually
 
-Current deps: `mcp[cli]`. That's it. `zoneinfo` and `datetime` are stdlib. If you want to add a dependency, justify it in the PR description and consider whether it could be implemented in stdlib first.
+Current deps: `mcp[cli]`, plus `tzdata` on Windows only (Windows has no system timezone database for `zoneinfo`). That's it. `zoneinfo` and `datetime` are stdlib. If you want to add a dependency, justify it in the PR description and consider whether it could be implemented in stdlib first.
 
 ### Pin Python `>=3.11`
 

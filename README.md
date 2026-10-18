@@ -77,6 +77,27 @@ MCP_TRANSPORT=http python -m timekeeper
 # Override with MCP_HOST and MCP_PORT
 ```
 
+Keep the default loopback bind. To serve other machines, put a TLS reverse proxy (such as nginx) in front rather than binding a public address.
+
+The HTTP server checks the `Host` and `Origin` headers to block DNS-rebinding attacks. Loopback names with an explicit port (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`, any port) are always allowed; a bare loopback `Host` without a port, as sent for port 80, gets `421`. If your proxy forwards the public hostname, allow it explicitly with comma-separated lists:
+
+```bash
+MCP_TRANSPORT=http \
+MCP_ALLOWED_HOSTS=time.example.org \
+MCP_ALLOWED_ORIGINS=https://time.example.org \
+python -m timekeeper
+```
+
+- **`MCP_ALLOWED_HOSTS`**: extra `Host` values, e.g. `time.example.org` or `time.example.org:8443`. `name:*` accepts any port. Other hosts get `421`.
+- **`MCP_ALLOWED_ORIGINS`**: extra `Origin` values for browser-based clients, written exactly as browsers send them: `scheme://host[:port]` with no path and no trailing slash (`https://time.example.org`, not `https://time.example.org/`, which never matches). Requests that send any other `Origin` get `403`. Requests with no `Origin` header, which is normal for non-browser MCP clients, are accepted.
+- **Request bodies** are limited to 64 KiB (`413` above that).
+- **Sessions** are stateful. A session idle for 10 minutes is closed, and its ID then gets `404`; per the MCP spec, the client must then start a new session. At most 200 sessions are open at once; further new sessions get `503`.
+- **Open streams keep sessions alive.** A session counts as idle only while no request is in flight, so a client holding a GET event stream open keeps its session past the 10-minute idle timeout for as long as the stream stays open.
+
+**Known risk: anonymous session exhaustion.** The 200-session cap is shared by every caller and there is no authentication. One client that opens 200 sessions and holds a GET stream open on each can keep all slots busy, so every new client gets `503` until those connections close. The app can't tell such clients from legitimate ones. Mitigate it at the reverse proxy with per-IP connection limits and read timeouts. Planned hardening (phase 5) adds these to the example nginx config (`limit_conn`, `limit_req`, short proxy timeouts) and checks that the timeouts don't cut off legitimate clients' streams.
+
+There is no authentication: the time tools are deliberately anonymous.
+
 For remote deployment, see `DEPLOY.md` (coming in v0.2 — for now, terminate TLS in nginx and reverse-proxy to the server).
 
 ## For AI agents using this server
