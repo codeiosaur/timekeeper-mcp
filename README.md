@@ -12,6 +12,14 @@ Anyone who has asked an LLM (Claude, ChatGPT, or otherwise) to plan a schedule a
 - **`convert_time`** — Converts an ISO 8601 timestamp from one timezone to another. Useful for translating deadlines ("rate limit resets at 02:00 UTC, when's that for me?") or surfacing the same event in multiple zones.
 - **`time_until`** — Computes time remaining until or elapsed since a target timestamp. Returns both a signed total-seconds value and a `days`/`hours`/`minutes`/`seconds` breakdown.
 
+There are three ways to run it:
+
+- **Local stdio** (most people): your MCP client starts the server as a subprocess on your own machine. No network involved. See [Quick start (local stdio)](#quick-start-local-stdio).
+- **Local HTTP**: the streamable-HTTP server on `127.0.0.1`, for clients that connect over HTTP or for testing before a deployment. See [Local HTTP](#local-http).
+- **Remote, behind a TLS reverse proxy**: one server for several machines or clients, with nginx in front. See [Remote deployment](#remote-deployment) and [`DEPLOY.md`](./DEPLOY.md).
+
+Whichever you choose, the answers come from the clock of the machine the server runs on, and the timezone comes from each request (default UTC), not from where the server is. See [Time source and timezones](#time-source-and-timezones).
+
 ## Quick start (local stdio)
 
 Requires Python 3.11 or newer.
@@ -67,9 +75,9 @@ Either use the discovery option in MCP settings ("from claude_desktop_config.jso
 }
 ```
 
-## Quick start (HTTP)
+## Local HTTP
 
-For testing the streamable-HTTP transport locally before deploying:
+For clients that connect over HTTP on the same machine, or for testing the streamable-HTTP transport before deploying:
 
 ```bash
 MCP_TRANSPORT=http python -m timekeeper
@@ -94,11 +102,42 @@ python -m timekeeper
 - **Sessions** are stateful. A session idle for 10 minutes is closed, and its ID then gets `404`; per the MCP spec, the client must then start a new session. At most 200 sessions are open at once; further new sessions get `503`.
 - **Open streams keep sessions alive.** A session counts as idle only while no request is in flight, so a client holding a GET event stream open keeps its session past the 10-minute idle timeout for as long as the stream stays open.
 
-**Known risk: anonymous session exhaustion.** The 200-session cap is shared by every caller and there is no authentication. One client that opens 200 sessions and holds a GET stream open on each can keep all slots busy, so every new client gets `503` until those connections close. The app can't tell such clients from legitimate ones. Mitigate it at the reverse proxy with per-IP connection limits and read timeouts. Planned hardening (phase 5) adds these to the example nginx config (`limit_conn`, `limit_req`, short proxy timeouts) and checks that the timeouts don't cut off legitimate clients' streams.
+**Known risk: anonymous session exhaustion.** The 200-session cap is shared by every caller and there is no authentication. One client that opens 200 sessions and holds a GET stream open on each can keep all slots busy, so every new client gets `503` until those connections close. The app can't tell such clients from legitimate ones. Mitigate it at the reverse proxy. The example nginx config (`deploy/nginx.conf.example`) limits each client IP address to 10 concurrent connections and 2 requests per second with a burst of 20 (excess requests get `429`). Its 30-second `proxy_read_timeout` closes a connection only when the app stops sending: the app sends a keep-alive ping on an open event stream every 15 seconds, so a client can hold a stream (and with it a session) open for as long as it keeps the connection. The per-address connection limit is what bounds that. The timeout is kept above the ping interval because at 15 seconds nginx raced the ping and closed healthy streams; the tests check that an initialized official MCP SDK session stays usable through nginx for longer than the ping interval. These controls raise the cost of exhaustion but don't prevent it: at 2 requests per second, a single address can still open 200 sessions in under two minutes, and those sessions last until the 10-minute idle timeout. Clients spread across many addresses are limited only by the totals.
 
 There is no authentication: the time tools are deliberately anonymous.
 
-For remote deployment, see `DEPLOY.md` (coming in v0.2 — for now, terminate TLS in nginx and reverse-proxy to the server).
+**Running under systemd.** The example unit (`deploy/timekeeper-mcp.service.example`) runs the HTTP server as an unprivileged user with the operating system read-only, home directories hidden, no capabilities, no way to gain privileges, IP traffic limited to loopback (`IPAddressDeny=any`, `IPAddressAllow=localhost`), and no Unix-domain sockets (`RestrictAddressFamilies=AF_INET AF_INET6`, which blocks creating them with `socket()` but leaves `socketpair()`, used by asyncio, alone). Loopback stays reachable: the service can connect to any other service listening on `127.0.0.1` or `::1` on the same host, so don't run unauthenticated services there. The IP restriction is best-effort: if systemd cannot install its BPF filter, it logs an error and runs the service without it (see `DEPLOY.md`, Step 5). These restrictions are not yet confirmed on Linux; `scripts/verify_systemd_sandbox.sh` is intended to verify them by behavior once it is run on a disposable Linux VM (it creates users and system files, so run it nowhere else).
+
+## Remote deployment
+
+To serve clients on other machines, run the HTTP server on loopback behind a TLS reverse proxy. [`DEPLOY.md`](./DEPLOY.md) is a step-by-step guide for an Ubuntu VM with nginx, Let's Encrypt and systemd: root-owned immutable releases under `/opt/timekeeper/releases`, an atomically switched `current` symlink, timestamped configuration backups, rollback, and a post-deploy check with `scripts/smoke.py`. Clients that only speak stdio (such as Claude Desktop) connect through `mcp-remote`; see DEPLOY.md, Step 8.
+
+### Self-hosting checklist
+
+- The server binds to `127.0.0.1`; only the reverse proxy is reachable from outside, over HTTPS.
+- `MCP_ALLOWED_HOSTS` names exactly the public hostname the proxy forwards.
+- The host clock is synchronized (`timedatectl` shows "System clock synchronized: yes").
+- The code is owned by root and not writable by the service user; the service runs with the example unit's sandboxing, and the journal shows no `bpf-firewall` errors (DEPLOY.md, Step 5).
+- The proxy enforces per-client rate and connection limits (the example nginx config does).
+- `scripts/smoke.py https://<your-host>/mcp` passes after each deploy.
+- You have decided how long to keep logs that contain client IP addresses (below).
+
+### Residual risks
+
+- **No authentication.** The tools are deliberately anonymous; anyone who can reach the endpoint can call them.
+- **Session exhaustion.** See the known risk under [Local HTTP](#local-http): rate and connection limits raise its cost but don't prevent it.
+- **Loopback access.** A compromised service process could still connect to other services on the host's loopback addresses.
+- **Unconfirmed sandbox.** The systemd restrictions are not yet confirmed by a run of `scripts/verify_systemd_sandbox.sh` on Linux, and the IP filter is best-effort.
+- **Wrong clock, stale tz data.** The server trusts the host clock and timezone database (see below).
+
+### Logs
+
+The service logs one line per HTTP request (method, path, status, client address) to the journal, and nginx keeps access logs with client IP addresses. Request bodies and tool arguments are not logged. How long these are kept is set by journald and logrotate; DEPLOY.md, "Logs and retention", shows where.
+
+## Time source and timezones
+
+- **The clock is the host's.** Every answer comes from the system clock of the machine the server runs on, read at the moment of the request. Keeping that clock correct is the host's job: NTP (via `systemd-timesyncd`, `chrony` or similar) synchronizes it, and this server only reads it. Check with `timedatectl` ("System clock synchronized: yes") or `chronyc tracking`. `scripts/smoke.py` also reports the skew between a server and the machine running the check.
+- **The server's location is not the user's timezone.** A server in Phoenix and a user in Boston get the same correct instant; the timezone of the answer is whatever IANA name the request passes (`timezone`, `target_timezone`), and `UTC` when none is given. The server's own system timezone is never used. Agents should pass the user's IANA timezone, and ask for it when they don't know it.
 
 ## For AI agents using this server
 
@@ -209,9 +248,13 @@ pytest
 
 Tests use an injected fake clock (`clock_fn=...`) so they're deterministic. See `tests/test_core.py` for the pattern.
 
+- `scripts/smoke.py URL`: the post-deploy check described above.
+- `scripts/bench.py`: descriptive latency measurements on this machine (core functions, in-memory MCP calls, and HTTP on loopback). It reports medians and 95th percentiles, not pass/fail thresholds.
+- `.github/workflows/ci.yml`: tests on Linux, Windows and macOS, a lowest-dependency run, a clean wheel install, the nginx tests, the pinned `mcp-remote` check, and the systemd sandbox verification on a disposable GitHub-hosted VM.
+
 ## Roadmap
 
-- [ ] HTTP deployment guide (nginx + Let's Encrypt + Oracle Cloud)
+- [x] HTTP deployment guide (nginx + Let's Encrypt + Oracle Cloud): see `DEPLOY.md`
 - [ ] Optional API-key tier for prioritizing operator's own requests
 - [ ] Internationalized human-readable strings
 - [ ] Business-day arithmetic (`time_until` with weekend/holiday skipping)

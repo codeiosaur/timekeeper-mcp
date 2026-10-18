@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only token; no job needs to write anything or use secrets.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash   # with -eo pipefail on every OS
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: ubuntu-latest, python: "3.14" }
+          - { os: windows-latest, python: "3.11" }
+          - { os: windows-latest, python: "3.14" }
+          - { os: macos-latest, python: "3.14" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the package with dev extras
+        run: python -m pip install -e ".[dev]"
+      - name: Run the test suite
+        run: python -m pytest -rs
+
+  floor:
+    name: lowest declared dependencies (mcp floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install "uv>=0.5,<1"
+      - name: Install with the lowest allowed direct dependencies
+        # `uv pip` installs into a separate venv; it never reads or writes uv.lock.
+        run: |
+          uv venv --python "$(command -v python)" "$RUNNER_TEMP/floor"
+          uv pip install --python "$RUNNER_TEMP/floor/bin/python" \
+            --resolution lowest-direct -e ".[dev]"
+      - name: Check that the declared mcp floor was resolved
+        run: |
+          "$RUNNER_TEMP/floor/bin/python" -c "
+          import importlib.metadata as m, sys
+          version = m.version('mcp')
+          print('mcp', version)
+          sys.exit(version != '1.30.0')
+          "
+      - name: Run the test suite on the floor versions
+        run: '"$RUNNER_TEMP/floor/bin/python" -m pytest -rs'
+      - name: Check uv.lock was not modified
+        run: git diff --exit-code -- uv.lock
+
+  wheel:
+    name: clean wheel install (stdio through the installed entry point)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir "$RUNNER_TEMP/dist"
+      - name: Install the wheel into a fresh venv
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install "$RUNNER_TEMP"/dist/*.whl
+      - name: Move the source package out of the checkout
+        # Any import of the source tree would now fail, so a pass below can
+        # only come from the installed wheel.
+        run: mv timekeeper "$RUNNER_TEMP/source-moved-away"
+      - name: Initialize, list and call over stdio via the installed entry point
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/wheel-venv/bin/python" -I - <<'EOF'
+          import json
+          import os
+          from pathlib import Path
+
+          import anyio
+          import timekeeper
+          from mcp import ClientSession, StdioServerParameters
+          from mcp.client.stdio import stdio_client
+
+          venv = Path(os.environ["RUNNER_TEMP"], "wheel-venv").resolve()
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          cwd = Path.cwd().resolve()
+          package = Path(timekeeper.__file__).resolve()
+          assert venv in package.parents, f"imported from {package}, not the wheel"
+          assert cwd != workspace and workspace not in cwd.parents, cwd
+          entry_point = venv / "bin" / "timekeeper-mcp"
+
+
+          async def flow():
+              params = StdioServerParameters(command=str(entry_point), args=[], cwd=str(cwd))
+              with anyio.fail_after(60):
+                  async with stdio_client(params) as (read, write):
+                      async with ClientSession(read, write) as session:
+                          await session.initialize()
+                          tools = {tool.name for tool in (await session.list_tools()).tools}
+                          assert tools == {"get_current_time", "convert_time", "time_until"}, tools
+                          result = await session.call_tool("get_current_time", {"timezone": "UTC"})
+                          assert result.isError is False, result.content
+                          print("installed entry point OK:",
+                                json.loads(result.content[0].text)["utc_iso"])
+
+
+          anyio.run(flow)
+          EOF
+
+  nginx:
+    name: nginx proxy tests (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install nginx and openssl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx openssl
+          sudo systemctl stop nginx || true   # the tests run their own unprivileged nginx
+          command -v nginx openssl
+      - name: Install the package with dev extras
+        run: python -m pip install -e ".[dev]"
+      - name: Run the nginx tests (temporary ports and certificates; must not skip)
+        run: |
+          python -m pytest tests/test_nginx_proxy.py -rs | tee "$RUNNER_TEMP/nginx-tests.log"
+          if grep -q SKIPPED "$RUNNER_TEMP/nginx-tests.log"; then
+            echo "::error::nginx tests were skipped; this job must run them" >&2
+            exit 1
+          fi
+
+  mcp-remote:
+    name: mcp-remote compatibility (pinned, local server only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the package with dev extras
+        run: python -m pip install -e ".[dev]"
+      - name: Run the pinned mcp-remote test against its temporary local server
+        # npx fetches the pinned mcp-remote from the npm registry; the test
+        # points it only at a server on an ephemeral loopback port.
+        env:
+          TIMEKEEPER_RUN_MCP_REMOTE: "1"
+        run: |
+          python -m pytest tests/test_http_transport.py -m mcp_remote -rs \
+            | tee "$RUNNER_TEMP/mcp-remote.log"
+          if grep -q SKIPPED "$RUNNER_TEMP/mcp-remote.log"; then
+            echo "::error::the mcp-remote test was skipped; this job must run it" >&2
+            exit 1
+          fi
+          if ! grep -qE '(^|[^0-9])1 passed' "$RUNNER_TEMP/mcp-remote.log"; then
+            echo "::error::expected exactly the one mcp-remote test to pass" >&2
+            exit 1
+          fi
+
+  systemd-sandbox:
+    name: systemd sandbox verification (disposable VM)
+    # A fresh GitHub-hosted VM: systemd is PID 1, passwordless sudo, and the
+    # machine is discarded after the job, which is what the script requires.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.11"   # Ubuntu 22.04's own python3 is 3.10
+      - name: Mark this VM as disposable
+        run: sudo sh -c 'cat /etc/machine-id > /etc/timekeeper-sandbox-disposable'
+      - name: Run the sandbox verification as root
+        run: |
+          sudo env TIMEKEEPER_SANDBOX_OPT_IN=this-vm-is-disposable \
+            TIMEKEEPER_PYTHON="${{ steps.python.outputs.python-path }}" \
+            bash scripts/verify_systemd_sandbox.sh
+      - name: Remove the disposable-VM marker
+        if: always()
+        run: sudo rm -f /etc/timekeeper-sandbox-disposable
