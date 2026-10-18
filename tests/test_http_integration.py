@@ -1,227 +1,135 @@
-"""Integration tests for the streamable-HTTP transport layer.
+"""End-to-end tests over the Streamable HTTP transport.
 
-Verifies that:
-1. The MCP server starts in HTTP mode and listens on the configured port
-2. The server responds to MCP protocol requests and maintains sessions
-3. The server shuts down gracefully when interrupted
-4. Transport layer doesn't introduce failures (the domain logic is tested in test_core.py
-   and test_server.py; this layer just verifies connectivity over HTTP)
+The real entrypoint runs as a subprocess on an ephemeral loopback port (see
+`tests/harness.py`). Tool calls go through the official MCP SDK client after
+a complete initialization; raw protocol edge cases use httpx. Transport
+security and session limits are covered in `test_http_transport.py`.
 """
 from __future__ import annotations
 
-import os
+import json
 import socket
-import subprocess
 import sys
-import time
-from pathlib import Path
 
+import anyio
+import httpx
 import pytest
-import requests
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+
+from tests import harness
+from tests.harness import (
+    PROJECT_ROOT, STOP_WAIT_SECONDS, TOOL_CALLS, HarnessError, initialize, post,
+    running_http_server,
+)
 
 
-PROJECT_ROOT = Path(__file__).parent.parent
+async def _run_tool_calls(url: str):
+    """Initialize an SDK client session and call every entry of TOOL_CALLS."""
+    results = []
+    with anyio.fail_after(30):
+        async with streamable_http_client(f"{url}/mcp") as (read, write, _):
+            async with ClientSession(read, write) as client:
+                init = await client.initialize()
+                tools = {tool.name for tool in (await client.list_tools()).tools}
+                for name, arguments, _expect_error, _fields in TOOL_CALLS:
+                    results.append(await client.call_tool(name, arguments))
+    return init, tools, results
 
 
-@pytest.fixture
-def http_server():
-    """Start the MCP server in streamable-HTTP mode and yield its URL.
+def test_all_tools_over_initialized_sdk_session(http_server):
+    init, tools, results = anyio.run(_run_tool_calls, http_server.url)
 
-    Automatically stops the server after the test completes.
-    """
-    env = os.environ.copy()
-    env["MCP_TRANSPORT"] = "http"
-    env["MCP_HOST"] = "127.0.0.1"
-    env["MCP_PORT"] = "8765"
+    assert init.protocolVersion in SUPPORTED_PROTOCOL_VERSIONS
+    assert init.serverInfo.name == "timekeeper"
+    assert tools == {"get_current_time", "convert_time", "time_until"}
+    for (name, arguments, expect_error, fields), result in zip(TOOL_CALLS, results):
+        assert result.isError is expect_error, (name, arguments)
+        payload = json.loads(result.content[0].text)
+        assert set(payload) == fields, (name, arguments)
+        assert payload == result.structuredContent
+        if expect_error:
+            assert isinstance(payload["error"], str) and payload["error"]
+            for key, value in arguments.items():
+                assert payload[key] == value
 
-    # Start the server
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "timekeeper"],
-        env=env,
-        cwd=PROJECT_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    conversion = results[2].structuredContent
+    assert conversion["converted_iso"] == "2026-11-01T01:30:00-05:00"
+    assert conversion["human_readable_24h"] == "Sunday, November 01, 2026 at 01:30 EST"
 
-    # Wait for server to be ready by checking port
-    max_retries = 20  # 2 seconds total
-    for attempt in range(max_retries):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(("127.0.0.1", 8765))
-            sock.close()
-            if result == 0:
-                time.sleep(0.1)  # Brief delay for server to fully initialize
-                break
-        except Exception:
+
+def test_malformed_json_is_rejected_without_internal_details(http_server):
+    response = post(http_server.url, b'{"jsonrpc": "2.0", "id": 1, "method": ')
+    assert response.status_code == 400
+    body = response.text
+    assert "Traceback" not in body
+    assert str(PROJECT_ROOT) not in body
+    assert ".py" not in body
+    assert response.json()["error"]["code"] == -32700  # JSON-RPC parse error
+
+
+def test_only_the_mcp_path_is_served(http_server):
+    assert httpx.get(f"{http_server.url}/", timeout=10).status_code == 404
+    assert httpx.post(f"{http_server.url}/not-mcp", content=b"{}", timeout=10).status_code == 404
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
+def test_sigterm_stops_server_and_releases_port(start_http_server):
+    server = start_http_server()
+    server.proc.terminate()
+    server.proc.wait(timeout=STOP_WAIT_SECONDS)
+    assert server.proc.returncode is not None
+    # No listener remains: the port can be bound again (checked without
+    # contacting anything). SO_REUSEADDR, as servers use, ignores leftover
+    # TIME_WAIT connections but still fails if a listener holds the port.
+    with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", server.port))
+
+
+def test_harness_reports_a_child_that_exits_early(start_http_server):
+    with pytest.raises(HarnessError, match="exited with code"):
+        start_http_server(MCP_TRANSPORT="not-a-transport")
+
+
+def test_harness_stops_child_when_startup_is_interrupted(tmp_path, monkeypatch):
+    class Interrupted(BaseException):  # like KeyboardInterrupt or a timeout signal
+        pass
+
+    started = []
+    real_popen = harness.subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        started.append(real_popen(*args, **kwargs))
+        return started[-1]
+
+    def interrupted(*args, **kwargs):
+        raise Interrupted
+
+    monkeypatch.setattr(harness.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(harness, "initialize", interrupted)
+    with pytest.raises(Interrupted):
+        with running_http_server(tmp_path):
             pass
-
-        if attempt == max_retries - 1:
-            proc.terminate()
-            stdout, stderr = proc.communicate(timeout=5)
-            raise RuntimeError(
-                f"Server failed to start. stderr: {stderr[:500]}"
-            )
-        time.sleep(0.1)
-
-    yield "http://127.0.0.1:8765/mcp"
-
-    # Cleanup
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+    assert len(started) == 1
+    assert started[0].poll() is not None  # stopped, not leaked
 
 
-class TestHTTPTransport:
-    """Test the HTTP transport layer."""
+def test_harness_retries_when_the_chosen_port_is_taken(tmp_path, monkeypatch):
+    # A controlled, test-owned socket stands in for another process that
+    # grabbed the port between free_port() and the child's bind.
+    with socket.socket() as squatter:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: forbid takeover
+            squatter.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        squatter.bind(("127.0.0.1", 0))
+        squatter.listen()
+        taken = squatter.getsockname()[1]
+        ports = iter([taken])
+        real_free_port = harness.free_port
+        monkeypatch.setattr(harness, "free_port", lambda: next(ports, None) or real_free_port())
 
-    def test_server_listens_on_configured_port(self):
-        """Verify the server binds to the configured port."""
-        env = os.environ.copy()
-        env["MCP_TRANSPORT"] = "http"
-        env["MCP_HOST"] = "127.0.0.1"
-        env["MCP_PORT"] = "8765"
-
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "timekeeper"],
-            env=env,
-            cwd=PROJECT_ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        try:
-            # Give server time to start
-            time.sleep(1)
-
-            # Check if port is open
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(("127.0.0.1", 8765))
-            sock.close()
-
-            assert result == 0, "Server did not bind to 127.0.0.1:8765"
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-
-    def test_server_responds_to_mcp_requests(self, http_server):
-        """Verify server responds with MCP headers when accessed."""
-        # The streamable-HTTP transport requires these Accept headers
-        response = requests.get(
-            http_server,
-            headers={"Accept": "application/json, text/event-stream"},
-            timeout=2,
-        )
-
-        # Should return 400 (missing session info for initial request) or 200
-        # depending on protocol version, but should NOT be 404 or 500
-        assert response.status_code in (
-            200,
-            400,
-        ), f"Unexpected status code: {response.status_code}"
-
-        # Check for MCP session ID header (indicates MCP protocol is working)
-        assert "mcp-session-id" in response.headers, "No MCP session ID in response"
-
-    def test_server_maintains_session(self, http_server):
-        """Verify server maintains session state across requests."""
-        # First request to establish session
-        response1 = requests.get(
-            http_server,
-            headers={"Accept": "application/json, text/event-stream"},
-            timeout=2,
-        )
-        session_id_1 = response1.headers.get("mcp-session-id")
-        assert session_id_1, "No session ID in first response"
-
-        # Second request gets a new session
-        response2 = requests.get(
-            http_server,
-            headers={"Accept": "application/json, text/event-stream"},
-            timeout=2,
-        )
-        session_id_2 = response2.headers.get("mcp-session-id")
-        assert session_id_2, "No session ID in second response"
-
-        # Sessions should be different (each GET creates a new session)
-        # This is acceptable behavior for the HTTP transport
-        assert isinstance(session_id_1, str) and len(session_id_1) > 0
-        assert isinstance(session_id_2, str) and len(session_id_2) > 0
-
-    def test_server_responds_quickly(self, http_server):
-        """Verify server responds within a reasonable time."""
-        import time
-
-        start = time.time()
-        response = requests.get(
-            http_server,
-            headers={"Accept": "application/json, text/event-stream"},
-            timeout=2,
-        )
-        elapsed = time.time() - start
-
-        # Response should be under 1 second (generous margin)
-        assert elapsed < 1.0, f"Server response took {elapsed}s"
-
-    def test_server_unavailable_raises_error(self):
-        """Verify that accessing an unavailable port raises an error."""
-        with pytest.raises(requests.RequestException):
-            requests.get(
-                "http://127.0.0.1:9999/mcp",  # Port with no server
-                headers={"Accept": "application/json, text/event-stream"},
-                timeout=1,
-            )
-
-    def test_server_graceful_shutdown(self):
-        """Verify server shuts down cleanly without hanging."""
-        env = os.environ.copy()
-        env["MCP_TRANSPORT"] = "http"
-
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "timekeeper"],
-            env=env,
-            cwd=PROJECT_ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        try:
-            # Wait for server to start
-            time.sleep(1)
-
-            # Verify it's running
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(("127.0.0.1", 8765))
-            sock.close()
-            assert result == 0, "Server did not start"
-
-            # Terminate and verify it exits cleanly
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                pytest.fail("Server did not exit cleanly within 5 seconds")
-
-            # Verify port is released
-            time.sleep(0.5)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(("127.0.0.1", 8765))
-            sock.close()
-            assert result != 0, "Port still bound after server shutdown"
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait()
+        with running_http_server(tmp_path) as server:
+            assert server.port != taken
+            assert initialize(server.url).status_code == 200
+        assert (tmp_path / f"http-server-{taken}.log").exists()
