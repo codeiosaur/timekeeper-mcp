@@ -101,7 +101,11 @@ If the project grows to need genuine OOP (state to manage, behavior to vary at r
 - **`tests/test_server.py`** — Adapter tests through a real MCP client session connected in memory: tool listing, annotations, success and error results as seen on the wire (`isError`, JSON text, `structuredContent`), and non-disclosure of internal errors.
 - **`tests/test_http_integration.py`** and **`tests/test_stdio.py`** — End-to-end tests against the real entrypoint as a subprocess: a complete initialized session through the official MCP SDK client calls every tool on success and error paths. The stdio tests also check that stdout carries only JSON-RPC messages and that diagnostics go to stderr.
 - **`tests/test_http_transport.py`** — HTTP transport configuration: `Host`/`Origin` validation, request-body limit, and session bounds.
+- **`tests/test_nginx_proxy.py`** — Renders `deploy/nginx.conf.example` and runs it with a local, unprivileged nginx in front of the real app (skipped when `nginx` or `openssl` is missing).
+- **`tests/test_smoke.py`** — Runs `scripts/smoke.py` against a temporary local server only.
 - **`tests/harness.py`** and **`tests/conftest.py`** — Shared subprocess harness: ephemeral ports, readiness by `initialize` POST with a 10 second deadline, child output to log files, and terminate-then-kill teardown. No test depends on a fixed port.
+
+Operational tools live in `scripts/` and are not part of the package: `smoke.py` (post-deploy check), `bench.py` (descriptive latency measurements), and `verify_systemd_sandbox.sh` with `sandbox_probe.py` (behavioral check of the systemd unit, for disposable Linux VMs only).
 
 We do not aim for 100% coverage. We aim for: every behavior the README documents has a test. Every bug we've ever hit has a regression test. That's enough.
 

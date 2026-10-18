@@ -19,6 +19,11 @@ from zoneinfo import ZoneInfo, available_timezones
 # Inputs echoed back in error messages are truncated to this many characters.
 _MAX_ECHO = 64
 
+# Files that some systems keep in their zoneinfo directory but that are not
+# IANA zone names: "localtime" (a link to the host's own zone, present on
+# Linux, where available_timezones() lists it) and "posixrules".
+_NON_IANA_KEYS = frozenset({"localtime", "posixrules"})
+
 
 class TimekeeperError(ValueError):
     """Raised for invalid input: unknown timezones, malformed timestamps."""
@@ -39,9 +44,11 @@ def _known_timezones() -> frozenset[str]:
     `ZoneInfo()` also rejects keys that `ZoneInfo()` alone would accept
     inconsistently across platforms (e.g. 'utc' on case-insensitive
     filesystems) and keeps path-like input away from the filesystem.
+    Host-specific entries such as 'localtime' are excluded, so the accepted
+    keys don't depend on how the host lays out its tz database.
     Timezone-data updates on disk take effect only after a restart.
     """
-    return frozenset(available_timezones())
+    return frozenset(available_timezones()) - _NON_IANA_KEYS
 
 
 def _echo(value: str) -> str:

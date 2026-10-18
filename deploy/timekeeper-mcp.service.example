@@ -2,12 +2,17 @@
 #
 # Install:
 #   sudo cp this file /etc/systemd/system/timekeeper-mcp.service
-#   Edit User=, WorkingDirectory=, and ExecStart= paths to match your setup.
+#   Replace YOUR_DOMAIN below, and adjust ExecStart= if your virtualenv lives
+#   elsewhere (see DEPLOY.md).
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now timekeeper-mcp
 #
 # View logs:
 #   sudo journalctl -u timekeeper-mcp -f
+#
+# The sandboxing below is checked by behavior with
+# scripts/verify_systemd_sandbox.sh, which must only run on a disposable
+# Linux VM.
 
 [Unit]
 Description=timekeeper-mcp MCP server (streamable-HTTP mode)
@@ -17,21 +22,24 @@ After=network.target
 Type=simple
 
 # Run as a non-root user. Create one if needed:
-#   sudo useradd -r -s /sbin/nologin timekeeper
+#   sudo useradd -r -s /usr/sbin/nologin timekeeper
 User=timekeeper
 
-# Path to the repo / installed package root
-WorkingDirectory=/opt/timekeeper-mcp
+# Run the installed entry point (not `python -m`, which would put the working
+# directory on sys.path) from a directory that holds no code. The install
+# under /opt/timekeeper should be owned by root and only readable by this
+# user; the service cannot modify it either way (ProtectSystem=strict).
+WorkingDirectory=/
+ExecStart=/opt/timekeeper/current/venv/bin/timekeeper-mcp
 
-# Activate the virtualenv if you installed into one; otherwise use the system python3
-ExecStart=/opt/timekeeper-mcp/.venv/bin/python -m timekeeper
-
-# Transport and bind address. 0.0.0.0 is intentional here because nginx listens
-# externally and proxies to 127.0.0.1:8765; the Python process never touches
-# the public interface directly.
+# Listen on loopback only; nginx on the same host terminates TLS and proxies
+# to 127.0.0.1:8765, so the process never binds a public interface.
+# MCP_ALLOWED_HOSTS must name the public domain nginx forwards as Host,
+# or the app answers 421.
 Environment=MCP_TRANSPORT=http
 Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8765
+Environment=MCP_ALLOWED_HOSTS=YOUR_DOMAIN
 
 # Restart policy: bring the process back up on any non-zero exit
 Restart=on-failure
@@ -43,6 +51,49 @@ TimeoutStopSec=10
 # Logging goes to journald automatically via stdout/stderr
 StandardOutput=journal
 StandardError=journal
+
+# --- Sandboxing -------------------------------------------------------------
+# Filesystem: the whole OS read-only, home directories (/home, /root,
+# /run/user) inaccessible, a private /tmp, and no physical devices.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+# Privileges: no capabilities, and no way to gain privileges (setuid
+# binaries and file capabilities have no effect).
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+
+# Kernel and control groups are off limits.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+# Network: IP sockets only, and IP traffic only to and from loopback. The
+# server makes no outbound connections, so this is meant to block reaching
+# cloud metadata, the private network, or the internet over IP.
+#   - Loopback stays reachable: this service can connect to any other service
+#     listening on 127.0.0.1 or ::1 on the same host.
+#   - Unix-domain sockets are left out of RestrictAddressFamilies, so the
+#     service should be unable to create one with socket(2) and thus to
+#     connect to host sockets such as the D-Bus system bus. The filter does
+#     not affect socketpair(2), which Python's asyncio event loop uses.
+# IPAddressDeny/Allow is applied best-effort: if systemd cannot install the
+# filter it runs the service without it, and `systemctl show` still reports
+# the configured value. See DEPLOY.md. These restrictions are not yet
+# confirmed on Linux; scripts/verify_systemd_sandbox.sh is intended to verify
+# them by behavior once it is run on a disposable Linux VM.
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+# System calls typical of a network service only; resource ceilings.
+SystemCallFilter=@system-service
+MemoryMax=256M
+TasksMax=64
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

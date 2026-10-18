@@ -6,12 +6,55 @@
 #
 # Assumptions:
 #   - certbot has already obtained a cert for your domain (see DEPLOY.md)
-#   - timekeeper-mcp is running on 127.0.0.1:8765 (systemd service)
-#   - replace YOUR_DOMAIN below with your actual domain (e.g. timekeeper.example.duckdns.org)
+#   - timekeeper-mcp is running on 127.0.0.1:8765 (systemd service), started
+#     with MCP_ALLOWED_HOSTS=YOUR_DOMAIN so it accepts the Host forwarded below
+#   - replace every YOUR_DOMAIN below with your actual domain
+#     (e.g. timekeeper.example.duckdns.org)
+#
+# This file is included inside nginx's `http { }` block (Debian/Ubuntu include
+# sites-enabled/* there), so the top-level directives below are http-scope.
+# tests/test_nginx_proxy.py renders this exact file and exercises it.
+
+# Per-client-IP limits for the anonymous MCP endpoint. A client connecting
+# makes a handful of requests (initialize, notification, tool list, calls);
+# the burst below absorbs that, and the rate allows steady normal use.
+limit_req_zone  $binary_remote_addr zone=timekeeper_req:10m  rate=2r/s;
+limit_conn_zone $binary_remote_addr zone=timekeeper_conn:10m;
+
+# Certificates managed by certbot; certbot will update these paths. Shared by
+# both HTTPS server blocks below (the catch-all needs one to finish the TLS
+# handshake before it closes the connection).
+ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+
+# Keep certbot's TLS options include and ssl_dhparam inside the server blocks.
+# Ubuntu's /etc/nginx/nginx.conf already sets ssl_prefer_server_ciphers at
+# http level, and certbot's options file sets it again, so including that file
+# at the top of this file fails `nginx -t` with a duplicate-directive error.
+# `server_tokens off` is set explicitly in every server block below.
+# Ubuntu's nginx.conf ships `server_tokens` commented out, so nginx's default
+# (on: version in the Server header and error pages) applies unless each
+# block turns it off; setting it per block keeps this file's behavior the same
+# whether or not an operator enables that http-level line.
+
+# Catch-all: requests for any other Host (scanners, IP-address requests,
+# DNS-rebinding attempts) get their connection closed with no response.
+server {
+    listen 80 default_server;
+    listen 443 ssl default_server;
+    server_name _;
+    include     /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    # Errors raised before routing (malformed requests, plain HTTP to the TLS
+    # port) still get a 400 page from this server; don't name the version.
+    server_tokens off;
+    return 444;
+}
 
 server {
     listen 80;
     server_name YOUR_DOMAIN;
+    server_tokens off;
 
     # Redirect all HTTP to HTTPS
     return 301 https://$host$request_uri;
@@ -20,33 +63,51 @@ server {
 server {
     listen 443 ssl;
     server_name YOUR_DOMAIN;
+    include     /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    server_tokens off;  # don't advertise the nginx version
 
-    # Certificates managed by certbot; certbot will update these paths
-    ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
-    include             /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+    # MCP requests are small JSON-RPC messages.
+    client_max_body_size  16k;
+    client_header_timeout 10s;
+    client_body_timeout   10s;
 
-    # Streamable-HTTP MCP: disable buffering so chunks reach the client immediately
-    proxy_buffering          off;
-    proxy_cache              off;
-    # MCP tool calls can take time; don't cut them off prematurely
-    proxy_read_timeout       120s;
-    proxy_send_timeout       120s;
-    proxy_connect_timeout    10s;
-
-    # Pass real IP to the app (useful for logs and future rate limiting)
-    proxy_set_header X-Real-IP        $remote_addr;
-    proxy_set_header X-Forwarded-For  $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header Host             $host;
-
-    location /mcp {
+    location = /mcp {
         proxy_pass http://127.0.0.1:8765/mcp;
-
-        # Required for HTTP/1.1 keep-alive through the proxy
         proxy_http_version 1.1;
-        proxy_set_header   Connection "";
+
+        # Every proxy_set_header must be in this block. nginx inherits
+        # proxy_set_header from an outer level only when the inner level sets
+        # none at all, so one header set here would silently drop any set at
+        # server level (nginx would then send its default Host,
+        # 127.0.0.1:8765, and no forwarding headers).
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $remote_addr;   # overwrite, don't append client values
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  "";             # empty value: header not sent
+        proxy_set_header Connection        "";             # HTTP/1.1 keep-alive to upstream
+
+        # Streamable HTTP: pass response chunks through immediately.
+        proxy_buffering off;
+        proxy_cache     off;
+
+        # Tool calls answer in milliseconds. proxy_read_timeout limits the
+        # silence between two reads from the app. The app's server-to-client
+        # event stream (GET /mcp) sends a keep-alive ping every 15 seconds
+        # (the default of sse-starlette, which the MCP SDK uses), so this must
+        # stay well above 15s: at exactly 15s nginx races the ping and closes
+        # a healthy stream before the ping arrives (seen in testing). 30s
+        # still closes a connection on which the app has gone silent.
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    15s;
+        proxy_read_timeout    30s;
+
+        # Anonymous rate and connection limits (per client IP).
+        limit_req        zone=timekeeper_req burst=20 nodelay;
+        limit_req_status 429;
+        limit_conn       timekeeper_conn 10;
+        limit_conn_status 429;
     }
 
     # Block everything else — this server does exactly one thing
@@ -54,28 +115,3 @@ server {
         return 404;
     }
 }
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SCAFFOLDING: Tiered API-key rate limiting (v2, do NOT enable in v1)
-#
-# Uncomment and adapt this block when you're ready to add API-key tiering.
-# You will also need to distribute API keys out-of-band and update the map.
-#
-# http {
-#     # Map API key header → rate limit zone name
-#     map $http_x_api_key $limit_zone {
-#         default          "unauthenticated";
-#         "key-tier-free"  "tier_free";
-#         "key-tier-pro"   "tier_pro";
-#     }
-#
-#     # Define zones: zone name, shared-memory size, requests/second
-#     limit_req_zone $binary_remote_addr zone=unauthenticated:10m rate=5r/m;
-#     limit_req_zone $binary_remote_addr zone=tier_free:10m       rate=30r/m;
-#     limit_req_zone $binary_remote_addr zone=tier_pro:10m        rate=300r/m;
-# }
-#
-# Inside the location /mcp block, add:
-#     limit_req zone=$limit_zone burst=10 nodelay;
-#     limit_req_status 429;
-# ─────────────────────────────────────────────────────────────────────────────

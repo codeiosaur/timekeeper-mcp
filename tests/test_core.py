@@ -4,6 +4,7 @@ Pure functions are tested with an injected fake clock for deterministic
 results. The tests cover happy paths, error paths, and DST handling.
 """
 from datetime import datetime, timedelta, timezone
+import zoneinfo
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -223,6 +224,37 @@ class TestTimezoneValidation:
         message = str(excinfo.value)
         assert len(message) < 300
         assert "100000 chars" in message
+
+    def test_host_specific_localtime_is_rejected_on_linux_layouts(self, tmp_path, monkeypatch):
+        # Linux distributions keep a "localtime" link to the host's own zone
+        # in /usr/share/zoneinfo, and available_timezones() lists every file
+        # with a TZif header, so it reports "localtime" as a zone there (but
+        # not on macOS). Rebuild that layout in a temporary tz directory so
+        # this check doesn't depend on this machine's own tz database.
+        for key in ("UTC", "America/New_York", "US/Pacific", "localtime"):
+            path = tmp_path / key
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"TZif" + b"\0" * 40)  # only the magic is read
+        saved = zoneinfo.TZPATH
+        zoneinfo.reset_tzpath(to=[str(tmp_path)])
+        try:
+            linux_like = zoneinfo.available_timezones()
+        finally:
+            zoneinfo.reset_tzpath(to=saved)
+        assert "localtime" in linux_like  # the platform behavior guarded against
+
+        # posixrules is the other non-zone file in such directories; this
+        # Python drops it itself, but the domain must not rely on that.
+        monkeypatch.setattr(core, "available_timezones", lambda: linux_like | {"posixrules"})
+        core._known_timezones.cache_clear()
+        try:
+            for key in ("localtime", "posixrules"):
+                with pytest.raises(core.TimekeeperError, match="Unknown timezone"):
+                    core.get_time_in_zone(key, clock_fn=fake_clock)
+            for key in ("UTC", "America/New_York", "US/Pacific"):
+                assert core.get_time_in_zone(key, clock_fn=fake_clock)["timezone"] == key
+        finally:
+            core._known_timezones.cache_clear()
 
     def test_zone_list_is_scanned_once(self, monkeypatch):
         calls = []
