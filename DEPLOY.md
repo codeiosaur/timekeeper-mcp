@@ -224,7 +224,7 @@ Key lines in the installed unit:
 
 The unit also sandboxes the service. It is configured so that the operating system is read-only to it, home directories are hidden, it has no capabilities and cannot gain privileges, it may only send and receive IP traffic on loopback (so a compromised process should not be able to reach cloud metadata, your private network, or the internet over IP), and it cannot create Unix-domain sockets (so it should not be able to connect to host sockets such as the D-Bus system bus; `socketpair()`, which Python's asyncio uses internally, is not affected). Loopback stays reachable: the service can connect to anything else listening on `127.0.0.1` or `::1` on the VM, so don't run unauthenticated services there.
 
-These restrictions are not yet confirmed on Linux. `scripts/verify_systemd_sandbox.sh` is intended to verify them by behavior once it is run on a disposable test VM. It creates users and system files and must only run on a disposable test VM, never on this server.
+`scripts/verify_systemd_sandbox.sh` checks these restrictions by behavior, and the CI workflow runs it on a fresh, disposable GitHub-hosted Ubuntu 22.04 VM; it has passed there since commit `839889d` on `main`. That covers this unit and release layout on a throwaway VM, not your server: it doesn't exercise certbot, nginx, the migration or a rollback, and the IP filter is still best-effort, so run the journal check below on your own server. README.md, "What the Linux verification covers", lists exactly what it checks. The script creates users and system files and must only run on a disposable test VM, never on this server.
 
 ### Switch `current` to the new release and start it
 

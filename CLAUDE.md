@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Behavioral guidelines for Claude Code (and any other AI coding agent) working on `timekeeper-mcp`. Read this first. Then read `ARCHITECTURE.md` for the structural picture and `PLAN.md` for what's being built and what's next.
+Behavioral guidelines for Claude Code (and any other AI coding agent) working on `timekeeper-mcp`. Read this first. Then read `ARCHITECTURE.md` for the structural picture, and `CHANGELOG.md` for what has changed between versions.
 
 > **Attribution:** This document is adapted from [Karpathy-inspired skills guidelines](https://github.com/forrestchang/andrej-karpathy-skills) by Forrest Chang, licensed under MIT. Used with permission.
 

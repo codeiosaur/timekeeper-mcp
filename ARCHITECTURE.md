@@ -117,4 +117,4 @@ These are deliberately not done. Resist the urge to do them as drive-bys.
 - **Natural language time parsing** ("next Tuesday at noon"). Adds a dependency on a parser, which itself can hallucinate. Bad fit for an authoritative-clock service.
 - **Caching.** The system clock is already fast. Caching introduces staleness bugs.
 - **Telemetry.** No metrics, no logs of who called what. If we add this in v2 it's via a structured logging interface, not scattered prints.
-- **Auth.** v2, when remote deployment exists. See PLAN.md.
+- **Auth.** Deliberately absent: the tools serve the current time, which is public, so the server is anonymous by design. An operator who wants to restrict or prioritize access does it in the reverse proxy in front of the server, not in this codebase.
