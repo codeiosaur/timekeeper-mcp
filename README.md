@@ -22,38 +22,62 @@ Whichever you choose, the answers come from the clock of the machine the server 
 
 ## Quick start (local stdio)
 
-Requires Python 3.11 or newer.
+Requires Python 3.11 or newer. timekeeper-mcp is not published on PyPI and has no tagged release yet, so install it from a checkout of this repository into an isolated environment of its own. Your MCP client then starts the installed `timekeeper-mcp` executable directly.
+
+Point clients at that executable by its **absolute path**. GUI apps such as Claude Desktop don't see your shell's `PATH`, and a bare `python -m timekeeper` runs whichever Python the client happens to find, which may not have the package installed.
+
+### Install
+
+With [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
 git clone https://github.com/codeiosaur/timekeeper-mcp.git
-cd timekeeper-mcp
-pip install -e .
+uv tool install ./timekeeper-mcp      # its own environment; uv picks (or downloads) a Python >= 3.11
+uv tool dir --bin                     # prints the directory that holds the timekeeper-mcp executable
 ```
 
-### Claude Desktop (macOS)
+The executable is `timekeeper-mcp` in that directory: `~/.local/bin/timekeeper-mcp` by default on macOS and Linux, and `timekeeper-mcp.exe` under `%USERPROFILE%\.local\bin` on Windows. To choose the Python, add `--python 3.12` (or a path to an interpreter).
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Without uv, a plain virtual environment works the same way. Use a Python 3.11 or newer (`python3 --version`):
+
+```bash
+git clone https://github.com/codeiosaur/timekeeper-mcp.git
+python3 -m venv ~/.local/share/timekeeper-mcp
+~/.local/share/timekeeper-mcp/bin/pip install ./timekeeper-mcp
+# the executable: ~/.local/share/timekeeper-mcp/bin/timekeeper-mcp
+```
+
+On Windows (PowerShell): `py -3 -m venv $env:LOCALAPPDATA\timekeeper-mcp`, then `& $env:LOCALAPPDATA\timekeeper-mcp\Scripts\pip install .\timekeeper-mcp`; the executable is `$env:LOCALAPPDATA\timekeeper-mcp\Scripts\timekeeper-mcp.exe`.
+
+To check the install on macOS or Linux, run the executable with no input: `/ABSOLUTE/PATH/TO/timekeeper-mcp < /dev/null` should print nothing and exit with status 0. (It is an MCP stdio server; started by hand without input, it just waits.)
+
+To update later, pull the checkout and reinstall: `git -C timekeeper-mcp pull`, then `uv tool install --reinstall ./timekeeper-mcp`, or `~/.local/share/timekeeper-mcp/bin/pip install --upgrade --force-reinstall ./timekeeper-mcp`.
+
+In the client examples below, replace `/ABSOLUTE/PATH/TO/timekeeper-mcp` with the executable's full path.
+
+### Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
   "mcpServers": {
     "timekeeper": {
-      "command": "python",
-      "args": ["-m", "timekeeper"]
+      "command": "/ABSOLUTE/PATH/TO/timekeeper-mcp"
     }
   }
 }
 ```
 
-Then quit Claude Desktop completely (Cmd+Q) and reopen. Look for `timekeeper` in the tools panel.
+On Windows, use the `.exe` path with doubled backslashes, for example `"C:\\Users\\you\\.local\\bin\\timekeeper-mcp.exe"`. Then quit Claude Desktop completely and reopen it. Look for `timekeeper` in the tools panel.
 
 ### Claude Code
 
 ```bash
-claude mcp add -s user timekeeper -- python -m timekeeper
+claude mcp add -s user timekeeper -- /ABSOLUTE/PATH/TO/timekeeper-mcp
 ```
 
-Or import directly from your Claude Desktop config:
+With uv on macOS or Linux, the shell can fill in the path: `claude mcp add -s user timekeeper -- "$(uv tool dir --bin)/timekeeper-mcp"`. Or import the entry from your Claude Desktop config:
 
 ```bash
 claude mcp add-from-claude-desktop
@@ -61,15 +85,14 @@ claude mcp add-from-claude-desktop
 
 ### VS Code (Copilot agent mode)
 
-Either use the discovery option in MCP settings ("from claude_desktop_config.json"), or add manually to your user `mcp.json`:
+Either use the discovery option in MCP settings ("from claude_desktop_config.json"), or add the server manually to your user `mcp.json`:
 
 ```json
 {
   "servers": {
     "timekeeper": {
       "type": "stdio",
-      "command": "python",
-      "args": ["-m", "timekeeper"]
+      "command": "/ABSOLUTE/PATH/TO/timekeeper-mcp"
     }
   }
 }
@@ -77,10 +100,10 @@ Either use the discovery option in MCP settings ("from claude_desktop_config.jso
 
 ## Local HTTP
 
-For clients that connect over HTTP on the same machine, or for testing the streamable-HTTP transport before deploying:
+For clients that connect over HTTP on the same machine, or for testing the streamable-HTTP transport before deploying, run the installed executable (see [Install](#install); use its full path if its directory isn't on your `PATH`):
 
 ```bash
-MCP_TRANSPORT=http python -m timekeeper
+MCP_TRANSPORT=http timekeeper-mcp
 # Server binds to 127.0.0.1:8765 by default
 # Override with MCP_HOST and MCP_PORT
 ```
@@ -93,7 +116,7 @@ The HTTP server checks the `Host` and `Origin` headers to block DNS-rebinding at
 MCP_TRANSPORT=http \
 MCP_ALLOWED_HOSTS=time.example.org \
 MCP_ALLOWED_ORIGINS=https://time.example.org \
-python -m timekeeper
+timekeeper-mcp
 ```
 
 - **`MCP_ALLOWED_HOSTS`**: extra `Host` values, e.g. `time.example.org` or `time.example.org:8443`. `name:*` accepts any port. Other hosts get `421`.
@@ -106,7 +129,7 @@ python -m timekeeper
 
 There is no authentication: the time tools are deliberately anonymous.
 
-**Running under systemd.** The example unit (`deploy/timekeeper-mcp.service.example`) runs the HTTP server as an unprivileged user with the operating system read-only, home directories hidden, no capabilities, no way to gain privileges, IP traffic limited to loopback (`IPAddressDeny=any`, `IPAddressAllow=localhost`), and no Unix-domain sockets (`RestrictAddressFamilies=AF_INET AF_INET6`, which blocks creating them with `socket()` but leaves `socketpair()`, used by asyncio, alone). Loopback stays reachable: the service can connect to any other service listening on `127.0.0.1` or `::1` on the same host, so don't run unauthenticated services there. The IP restriction is best-effort: if systemd cannot install its BPF filter, it logs an error and runs the service without it (see `DEPLOY.md`, Step 5). These restrictions are not yet confirmed on Linux; `scripts/verify_systemd_sandbox.sh` is intended to verify them by behavior once it is run on a disposable Linux VM (it creates users and system files, so run it nowhere else).
+**Running under systemd.** The example unit (`deploy/timekeeper-mcp.service.example`) runs the HTTP server as an unprivileged user with the operating system read-only, home directories hidden, no capabilities, no way to gain privileges, IP traffic limited to loopback (`IPAddressDeny=any`, `IPAddressAllow=localhost`), and no Unix-domain sockets (`RestrictAddressFamilies=AF_INET AF_INET6`, which blocks creating them with `socket()` but leaves `socketpair()`, used by asyncio, alone). Loopback stays reachable: the service can connect to any other service listening on `127.0.0.1` or `::1` on the same host, so don't run unauthenticated services there. The IP restriction is best-effort: if systemd cannot install its BPF filter, it logs an error and runs the service without it (see `DEPLOY.md`, Step 5). `scripts/verify_systemd_sandbox.sh` checks these restrictions by behavior, and CI runs it on a fresh, disposable GitHub-hosted Ubuntu 22.04 VM; it has passed there since commit `839889d` on `main` (see [What the Linux verification covers](#what-the-linux-verification-covers)). It creates users and system files, so never run it anywhere else.
 
 ## Remote deployment
 
@@ -127,12 +150,24 @@ To serve clients on other machines, run the HTTP server on loopback behind a TLS
 - **No authentication.** The tools are deliberately anonymous; anyone who can reach the endpoint can call them.
 - **Session exhaustion.** See the known risk under [Local HTTP](#local-http): rate and connection limits raise its cost but don't prevent it.
 - **Loopback access.** A compromised service process could still connect to other services on the host's loopback addresses.
-- **Unconfirmed sandbox.** The systemd restrictions are not yet confirmed by a run of `scripts/verify_systemd_sandbox.sh` on Linux, and the IP filter is best-effort.
+- **Sandbox verified only on a disposable VM.** The systemd restrictions were verified by behavior on a GitHub-hosted Ubuntu 22.04 VM, not on your server; the IP filter is best-effort, and loopback stays reachable.
 - **Wrong clock, stale tz data.** The server trusts the host clock and timezone database (see below).
 
 ### Logs
 
 The service logs one line per HTTP request (method, path, status, client address) to the journal, and nginx keeps access logs with client IP addresses. Request bodies and tool arguments are not logged. How long these are kept is set by journald and logrotate; DEPLOY.md, "Logs and retention", shows where.
+
+### What the Linux verification covers
+
+The CI job "systemd sandbox verification" installs a release on a fresh GitHub-hosted Ubuntu 22.04 VM, runs `scripts/verify_systemd_sandbox.sh` as root, and throws the VM away. It first passed on `main` at commit `839889d`, checking by behavior that the service, under the example unit:
+
+- runs as the unprivileged `timekeeper` user, with no capabilities, and cannot gain privileges through a setuid binary;
+- cannot write to `/opt`, `/etc` or `/usr` (read-only), cannot read files under `/root` or `/home`, gets a private `/tmp` and sees no block devices;
+- cannot create Unix-domain sockets but can use `socketpair()`;
+- can reach a listener on loopback, while a listener on the VM's own non-loopback address that the same user reaches from outside the sandbox receives no connection from inside it;
+- starts, answers an initialized MCP session over loopback, doesn't log tool arguments, and stops cleanly; and that systemd logged no BPF-firewall errors for it.
+
+It does not verify your server, a real deployment from `DEPLOY.md` (certbot, nginx, the migration or a rollback), real clients such as Claude Desktop through `mcp-remote`, or that traffic to arbitrary internet destinations is blocked (it only uses local listeners and reserved documentation addresses). The IPv6 part of the check is skipped when the VM has no IPv6 route, as on GitHub's runners. The IP filter remains best-effort and loopback remains reachable, as described above.
 
 ## Time source and timezones
 
@@ -244,20 +279,23 @@ Successful response:
 ```bash
 pip install -e ".[dev]"
 pytest
+python -m timekeeper          # run the server from the source tree (stdio by default)
 ```
 
-Tests use an injected fake clock (`clock_fn=...`) so they're deterministic. See `tests/test_core.py` for the pattern.
+The editable install is for working on the code; for using the server, install it as described in [Install](#install). Tests use an injected fake clock (`clock_fn=...`) so they're deterministic. See `tests/test_core.py` for the pattern.
 
 - `scripts/smoke.py URL`: the post-deploy check described above.
 - `scripts/bench.py`: descriptive latency measurements on this machine (core functions, in-memory MCP calls, and HTTP on loopback). It reports medians and 95th percentiles, not pass/fail thresholds.
 - `.github/workflows/ci.yml`: tests on Linux, Windows and macOS, a lowest-dependency run, a clean wheel install, the nginx tests, the pinned `mcp-remote` check, and the systemd sandbox verification on a disposable GitHub-hosted VM.
+- `CHANGELOG.md` lists what changed in each version; `RELEASING.md` is the maintainer checklist for tagging a release.
 
 ## Roadmap
 
 - [x] HTTP deployment guide (nginx + Let's Encrypt + Oracle Cloud): see `DEPLOY.md`
-- [ ] Optional API-key tier for prioritizing operator's own requests
 - [ ] Internationalized human-readable strings
 - [ ] Business-day arithmetic (`time_until` with weekend/holiday skipping)
+
+Not planned: authentication or API keys. The server is deliberately anonymous; it serves the current time, which is public. An operator who wants to restrict or prioritize access can do that in the reverse proxy in front of the server (for example with nginx rate limits or access rules), without changes here.
 
 ## License
 
